@@ -185,11 +185,20 @@ restart-safe:
 
 - Before enqueue: insert `session_operation` row (`queued`).
 - Worker transitions: `queued -> running -> done/failed/canceled`.
+- If a completed turn cannot persist its terminal status, the worker leaves the
+  operation `running` instead of marking it failed, so startup recovery can reset the
+  session to `Review` rather than overlooking a persistent `InProgress` session. That
+  worker stops dispatching later messages until recovery so it cannot execute more work
+  from the inconsistent status.
 - Cancel requests are persisted and checked before command execution.
 - On startup, unfinished operations are failed with reason `Interrupted by app restart`,
   interrupted rebase operations abort stale in-progress git rebase metadata, and
   impacted sessions are reset to `Review`. Pending post-merge stacked-child syncs are
   requeued.
+- Prompts queued behind an active turn send ordered drain wake-ups to the same worker.
+  If transcript persistence fails, the prompt returns to the front of the queue and the
+  next pending wake-up retries it before later prompts, preserving FIFO order without a
+  polling loop.
 
 ### Status Transition Rules
 
@@ -414,6 +423,17 @@ runtime flow:
   startup.
 - Session snapshots in memory are authoritative for rendering; DB is authoritative for
   restart recovery.
+- Durable session mutations commit before shared handles change or `SessionUpdated` is
+  emitted. Failed status or transcript writes therefore leave the render snapshot and
+  reducer event stream unchanged.
+- Status transitions use the validated current status as a SQLite compare-and-swap
+  condition, so concurrent stale transitions cannot both commit. The initial prompt,
+  title, user transcript row, runnable status/timing, draft flag, and queued operation
+  commit together before the first-turn snapshot is published or dispatched.
+- Status and active-work timing, transcript messages and ordering metadata, and
+  completed-turn metadata each commit through transaction-scoped repository methods;
+  app-layer callers receive persistence errors instead of publishing best-effort
+  snapshots.
 - System logs are process-local only: a bounded in-memory buffer, never written to
   SQLite or disk.
 - Shared session handles provide low-latency updates between DB reloads.

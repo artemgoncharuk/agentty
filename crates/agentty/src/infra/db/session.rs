@@ -10,6 +10,28 @@ use crate::domain::session::{SessionFollowUpTask, SessionId, SessionStats};
 use crate::domain::session_message::{SessionMessageKind, stored_message_content};
 use crate::infra::db::DbError;
 
+/// Atomic persistence payload for the first runnable session turn.
+pub struct FirstSessionTurnPersistence<'a> {
+    /// Persisted status that must still own the transition.
+    pub(crate) expected_status: &'a str,
+    /// Stable session identifier.
+    pub(crate) id: &'a str,
+    /// Canonical user-prompt transcript content.
+    pub(crate) message_content: &'a str,
+    /// Queued operation identifier dispatched after commit.
+    pub(crate) operation_id: &'a str,
+    /// Stable operation kind stored for recovery.
+    pub(crate) operation_kind: &'a str,
+    /// First prompt saved on the session row.
+    pub(crate) prompt: &'a str,
+    /// Runnable status published after commit.
+    pub(crate) status: &'a str,
+    /// Wall-clock timestamp used for timing and operation ordering.
+    pub(crate) timestamp_seconds: i64,
+    /// Initial display title derived from the first prompt.
+    pub(crate) title: &'a str,
+}
+
 /// Transactional turn-metadata payload persisted after one completed agent
 /// turn.
 ///
@@ -388,6 +410,13 @@ pub trait SessionRepository: Send + Sync {
         turn_metadata: &SessionTurnMetadata,
     ) -> Result<(), DbError>;
 
+    /// Persists the first prompt metadata, transcript row, runnable status,
+    /// and queued operation in one transaction.
+    async fn persist_first_session_turn(
+        &self,
+        persistence: FirstSessionTurnPersistence<'_>,
+    ) -> Result<bool, DbError>;
+
     /// Replaces the persisted follow-up task list for one session inside one
     /// transaction so task deletion and reinsertion commit atomically.
     async fn replace_session_follow_up_tasks(
@@ -493,6 +522,16 @@ pub trait SessionRepository: Send + Sync {
         status: &str,
         timestamp_seconds: i64,
     ) -> Result<(), DbError>;
+
+    /// Atomically updates status and timing only when the persisted status
+    /// still matches `expected_status`.
+    async fn transition_session_status_with_timing_at(
+        &self,
+        id: &str,
+        expected_status: &str,
+        status: &str,
+        timestamp_seconds: i64,
+    ) -> Result<bool, DbError>;
 
     /// Updates the persisted session summary text for a session row.
     async fn update_session_summary(&self, id: &str, summary: &str) -> Result<(), DbError>;
@@ -1595,6 +1634,75 @@ ON CONFLICT(session_id, model) DO UPDATE SET
         Ok(())
     }
 
+    async fn persist_first_session_turn(
+        &self,
+        persistence: FirstSessionTurnPersistence<'_>,
+    ) -> Result<bool, DbError> {
+        let message_content =
+            stored_message_content(SessionMessageKind::UserPrompt, persistence.message_content);
+        let mut transaction = self.0.begin().await?;
+        let update_result = sqlx::query(
+            r"
+UPDATE session
+SET prompt = ?,
+    title = ?,
+    status = ?,
+    is_draft = 0,
+    in_progress_started_at = COALESCE(in_progress_started_at, ?),
+    updated_at = ?
+WHERE id = ?
+  AND status = ?
+",
+        )
+        .bind(persistence.prompt)
+        .bind(persistence.title)
+        .bind(persistence.status)
+        .bind(persistence.timestamp_seconds)
+        .bind(persistence.timestamp_seconds)
+        .bind(persistence.id)
+        .bind(persistence.expected_status)
+        .execute(&mut *transaction)
+        .await?;
+        if update_result.rows_affected() == 0 {
+            transaction.rollback().await?;
+
+            return Ok(false);
+        }
+
+        sqlx::query(
+            r"
+INSERT INTO session_message (session_id, position, kind, content, created_at)
+SELECT ?, COALESCE(MAX(position), -1) + 1, ?, ?, ?
+FROM session_message
+WHERE session_id = ?
+",
+        )
+        .bind(persistence.id)
+        .bind(SessionMessageKind::UserPrompt.as_str())
+        .bind(message_content)
+        .bind(persistence.timestamp_seconds)
+        .bind(persistence.id)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            r"
+INSERT INTO session_operation (id, session_id, kind, status, queued_at)
+VALUES (?, ?, ?, 'queued', ?)
+",
+        )
+        .bind(persistence.operation_id)
+        .bind(persistence.id)
+        .bind(persistence.operation_kind)
+        .bind(persistence.timestamp_seconds)
+        .execute(&mut *transaction)
+        .await?;
+
+        transaction.commit().await?;
+
+        Ok(true)
+    }
+
     async fn replace_session_follow_up_tasks(
         &self,
         session_id: &str,
@@ -1968,6 +2076,42 @@ WHERE id = ?
         .await?;
 
         Ok(())
+    }
+
+    async fn transition_session_status_with_timing_at(
+        &self,
+        id: &str,
+        expected_status: &str,
+        status: &str,
+        timestamp_seconds: i64,
+    ) -> Result<bool, DbError> {
+        let update_result = sqlx::query(
+            r"
+UPDATE session
+SET status = ?,
+    in_progress_total_seconds = CASE
+        WHEN ? = 'InProgress' OR in_progress_started_at IS NULL THEN in_progress_total_seconds
+        ELSE in_progress_total_seconds + MAX(0, ? - in_progress_started_at)
+    END,
+    in_progress_started_at = CASE
+        WHEN ? = 'InProgress' THEN COALESCE(in_progress_started_at, ?)
+        ELSE NULL
+    END
+WHERE id = ?
+  AND status = ?
+",
+        )
+        .bind(status)
+        .bind(status)
+        .bind(timestamp_seconds)
+        .bind(status)
+        .bind(timestamp_seconds)
+        .bind(id)
+        .bind(expected_status)
+        .execute(&self.0)
+        .await?;
+
+        Ok(update_result.rows_affected() == 1)
     }
 
     async fn update_session_summary(&self, id: &str, summary: &str) -> Result<(), DbError> {

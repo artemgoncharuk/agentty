@@ -11,7 +11,8 @@ use crate::domain::session::{
 use crate::domain::session_message::SessionMessageKind;
 use crate::domain::setting::SettingName;
 use crate::infra::db::{
-    SessionFocusedReviewRow, SessionOperationRow, SessionRow, SessionTurnMetadata,
+    FirstSessionTurnPersistence, SessionFocusedReviewRow, SessionOperationRow, SessionRow,
+    SessionTurnMetadata,
 };
 /// Environment flag used to run the DST regression helper in an isolated
 /// subprocess with a fixed timezone.
@@ -297,6 +298,101 @@ async fn test_append_session_message_writes_message_rows() {
         SessionMessageKind::WorkflowNotice.as_str()
     );
     assert_eq!(messages[2].content, "\n[Sync Error] failed\n");
+}
+
+/// Asserts that a failed later step rolls the complete first-turn transaction
+/// back to its draft state.
+async fn assert_first_turn_transaction_rolls_back(trigger_sql: &'static str) {
+    let (database, pool) = AppRepositories::in_memory_with_pool().await;
+    let project_id = database
+        .projects()
+        .upsert_project("/tmp/project", Some("main".to_string()))
+        .await
+        .expect("failed to insert project");
+    database
+        .sessions()
+        .insert_draft_session("session-a", "gpt-5.5", "main", "Draft", project_id)
+        .await
+        .expect("failed to insert draft session");
+    sqlx::query(trigger_sql)
+        .execute(&pool)
+        .await
+        .expect("failed to install failure trigger");
+
+    let result = database
+        .sessions()
+        .persist_first_session_turn(FirstSessionTurnPersistence {
+            expected_status: "Draft",
+            id: "session-a",
+            message_content: "first prompt",
+            operation_id: "operation-a",
+            operation_kind: "start_prompt",
+            prompt: "first prompt",
+            status: "InProgress",
+            timestamp_seconds: 10,
+            title: "first prompt",
+        })
+        .await;
+
+    assert!(result.is_err());
+    let session = database
+        .sessions()
+        .load_sessions()
+        .await
+        .expect("failed to load sessions")
+        .into_iter()
+        .find(|session| session.id == "session-a")
+        .expect("missing session");
+    assert_eq!(session.status, "Draft");
+    assert!(session.prompt.is_empty());
+    assert_eq!(session.title, None);
+    assert!(session.is_draft);
+    assert!(
+        database
+            .sessions()
+            .load_session_messages("session-a")
+            .await
+            .expect("failed to load messages")
+            .is_empty()
+    );
+    assert!(
+        database
+            .operations()
+            .load_unfinished_session_operations()
+            .await
+            .expect("failed to load operations")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn test_first_turn_transaction_rolls_back_when_transcript_insert_fails() {
+    // Arrange / Act / Assert
+    assert_first_turn_transaction_rolls_back(
+        r"
+CREATE TRIGGER fail_first_turn_message
+BEFORE INSERT ON session_message
+BEGIN
+    SELECT RAISE(FAIL, 'injected transcript failure');
+END
+",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn test_first_turn_transaction_rolls_back_when_operation_insert_fails() {
+    // Arrange / Act / Assert
+    assert_first_turn_transaction_rolls_back(
+        r"
+CREATE TRIGGER fail_first_turn_operation
+BEFORE INSERT ON session_operation
+BEGIN
+    SELECT RAISE(FAIL, 'injected operation failure');
+END
+",
+    )
+    .await;
 }
 
 /// Verifies legacy transcript checkpoints keep their old collapse semantics

@@ -10,12 +10,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use agentty::db::{DB_DIR, DB_FILE, Database};
+use agentty::db::{DB_DIR, DB_FILE, Database, SessionTimelineMessage};
 use agentty::domain::agent::ReasoningLevel;
 use agentty::domain::session::{
     ForgeKind, ReviewRequest, ReviewRequestState, ReviewRequestSummary,
 };
-use agentty::domain::session_message::SessionMessageKind;
+use agentty::domain::session_message::{SessionMessageKind, SessionMessageState};
 use agentty::test_support;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection, Executor};
@@ -294,9 +294,15 @@ fn seed_session_with_typed_marker_collision(
             .await?;
         database
             .sessions()
-            .update_session_summary(
+            .upsert_session_timeline_message(
                 session_id,
-                r#"{"turn":"Kept marker-looking output in the assistant answer.","session":"Typed transcript rows preserve render grouping."}"#,
+                SessionTimelineMessage {
+                    content: r#"{"turn":"Kept marker-looking output in the assistant answer.","session":"Typed transcript rows preserve render grouping."}"#,
+                    entry_key: "turn_summary:0",
+                    kind: SessionMessageKind::TurnSummary,
+                    state: SessionMessageState::Resolved,
+                    turn_id: 0,
+                },
             )
             .await
     })?;
@@ -639,8 +645,8 @@ fn seed_all_model_picker_cli_stubs(env: &BuilderEnv) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Seeds one review-ready session with a focused review already persisted as
-/// if Agentty had been restarted after review generation completed.
+/// Seeds a later prompt before delayed turn-one metadata resolves, proving
+/// semantic timeline order survives persistence and reload.
 fn seed_review_ready_session_with_persisted_focused_review(
     env: &BuilderEnv,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -652,10 +658,52 @@ fn seed_review_ready_session_with_persisted_focused_review(
         let database = common::open_database(env).await?;
         database
             .sessions()
-            .update_session_focused_review(
+            .append_session_message(
                 "review-shortcut-0001",
-                Some("42".to_string()),
-                Some("## Review\nPersisted focused review finding.".to_string()),
+                SessionMessageKind::UserPrompt,
+                "Implement the stable session timeline.",
+            )
+            .await?;
+        database
+            .sessions()
+            .append_session_message(
+                "review-shortcut-0001",
+                SessionMessageKind::AssistantAnswer,
+                "The first turn is complete.",
+            )
+            .await?;
+        database
+            .sessions()
+            .append_session_message(
+                "review-shortcut-0001",
+                SessionMessageKind::UserPrompt,
+                "Polish the remaining details.",
+            )
+            .await?;
+        database
+            .sessions()
+            .upsert_session_timeline_message(
+                "review-shortcut-0001",
+                SessionTimelineMessage {
+                    content: r#"{"turn":"Completed the stable timeline.","session":"Timeline entries stay attached to their turns."}"#,
+                    entry_key: "turn_summary:1",
+                    kind: SessionMessageKind::TurnSummary,
+                    state: SessionMessageState::Resolved,
+                    turn_id: 1,
+                },
+            )
+            .await?;
+        database
+            .sessions()
+            .upsert_session_timeline_message(
+                "review-shortcut-0001",
+                SessionTimelineMessage {
+                    content: "## Review\nPersisted focused review finding.",
+                    entry_key: "focused_review:42",
+                    kind: SessionMessageKind::FocusedReview,
+                    state: SessionMessageState::Resolved,
+                    turn_id: 1,
+                },
             )
             .await
     })?;
@@ -2781,8 +2829,8 @@ fn session_view_mermaid_output() -> E2eResult {
     Ok(())
 }
 
-/// Verify that persisted focused review text is restored into the session
-/// output panel after Agentty starts again.
+/// Verify delayed summary and review entries retain their turn placement after
+/// a later prompt is stored and Agentty starts again.
 #[test]
 fn persisted_focused_review_survives_reload() -> E2eResult {
     // Arrange, Act, Assert
@@ -2799,12 +2847,27 @@ fn persisted_focused_review_survives_reload() -> E2eResult {
                     .viewing_pause_ms(1500)
                     .capture_labeled(
                         "persisted_focused_review",
-                        "Persisted focused review visible after startup",
+                        "Turn summary and review remain before the later prompt",
                     )
             },
             |frame, _report| {
                 let full = Region::full(frame.cols(), frame.rows());
+                let view_text = frame.text_in_region(&full);
+
+                assertion::assert_text_in_region(frame, "Completed the stable timeline.", &full);
                 assertion::assert_text_in_region(frame, "Persisted focused review finding.", &full);
+                assertion::assert_text_in_region(frame, "Polish the remaining details.", &full);
+                let summary_index = view_text
+                    .find("Completed the stable timeline.")
+                    .expect("summary should be visible");
+                let review_index = view_text
+                    .find("Persisted focused review finding.")
+                    .expect("review should be visible");
+                let next_prompt_index = view_text
+                    .find("Polish the remaining details.")
+                    .expect("later prompt should be visible");
+                assert!(summary_index < review_index);
+                assert!(review_index < next_prompt_index);
             },
         )?;
 

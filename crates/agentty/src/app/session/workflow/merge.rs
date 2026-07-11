@@ -26,8 +26,8 @@ use crate::app::service::SessionUpdateVersionMap;
 use crate::app::session::{Clock, SessionError};
 use crate::app::{AppEvent, AppServices, ProjectManager, SessionManager};
 use crate::domain::agent::{AgentKind, AgentModel, AgentSelection, ReasoningLevel};
-use crate::domain::session::{PublishedBranchSyncStatus, SessionId, Status};
-use crate::domain::session_message::SessionTranscript;
+use crate::domain::session::{SessionId, Status};
+use crate::domain::session_message::{SessionMessageKind, SessionMessageState, SessionTranscript};
 use crate::domain::transcript_notice::TranscriptNotice;
 use crate::infra::db::AppRepositories;
 use crate::infra::fs::{self as fs, FsClient};
@@ -2179,19 +2179,30 @@ impl SessionManager {
         };
 
         let sync_operation_id = uuid::Uuid::new_v4().to_string();
-
-        if app_event_tx
-            .send(AppEvent::PublishedBranchSyncUpdated {
-                session_id: SessionId::from(session_id),
-                sync_operation_id: sync_operation_id.clone(),
-                sync_status: PublishedBranchSyncStatus::InProgress,
-            })
-            .is_err()
+        let entry_key = format!("branch_push:{sync_operation_id}");
+        let turn_id = transcript
+            .lock()
+            .map_or(0, |transcript| transcript.current_turn_id());
+        if let Err(error) = SessionTaskService::upsert_timeline_message(
+            transcript,
+            db,
+            app_event_tx,
+            session_update_versions,
+            session_id,
+            super::task::SessionTimelineMessageUpdate {
+                content: "Auto-pushing published branch after completed rebase...",
+                entry_key: &entry_key,
+                kind: crate::domain::session_message::SessionMessageKind::WorkflowNotice,
+                state: crate::domain::session_message::SessionMessageState::Pending,
+                turn_id,
+            },
+        )
+        .await
         {
             warn!(
                 session_id = session_id,
-                sync_operation_id = sync_operation_id,
-                "failed to publish branch sync start because the app event receiver is closed"
+                %error,
+                "failed to post post-rebase branch sync timeline entry"
             );
         }
         let review_request_metadata_sync = Some(published_branch::ReviewRequestMetadataSyncInput {
@@ -2209,14 +2220,15 @@ impl SessionManager {
         let auto_push_input = PublishedBranchAutoPushInput {
             app_event_tx,
             db,
+            entry_key,
             folder,
             git_client,
             published_upstream_ref,
             review_request_metadata_sync,
             session_id,
             session_update_versions: session_update_versions.clone(),
-            sync_operation_id,
             transcript,
+            turn_id,
         };
 
         tokio::spawn(async move {
@@ -2267,9 +2279,26 @@ impl SessionManager {
             commit_message,
         );
 
+        let turn_id = db
+            .sessions()
+            .load_session_messages(session_id)
+            .await
+            .ok()
+            .and_then(|messages| messages.into_iter().map(|message| message.turn_id).max())
+            .unwrap_or_default();
+        let entry_key = format!("turn_summary:{turn_id}");
         if let Err(error) = db
             .sessions()
-            .update_session_summary(session_id, &summary)
+            .upsert_session_timeline_message(
+                session_id,
+                crate::infra::db::SessionTimelineMessage {
+                    content: &summary,
+                    entry_key: &entry_key,
+                    kind: SessionMessageKind::TurnSummary,
+                    state: SessionMessageState::Resolved,
+                    turn_id,
+                },
+            )
             .await
         {
             warn!(
@@ -2283,7 +2312,7 @@ impl SessionManager {
     /// Loads the currently persisted session summary text for one session.
     async fn persisted_session_summary(db: &AppRepositories, session_id: &str) -> Option<String> {
         db.sessions()
-            .load_session_summary(session_id)
+            .load_latest_session_message(session_id, SessionMessageKind::TurnSummary)
             .await
             .ok()
             .flatten()
@@ -3427,7 +3456,16 @@ mod tests {
         let existing_summary = "- Session branch updates README.";
         database
             .sessions()
-            .update_session_summary("session-id", existing_summary)
+            .upsert_session_timeline_message(
+                "session-id",
+                crate::infra::db::SessionTimelineMessage {
+                    content: existing_summary,
+                    entry_key: "turn_summary:0",
+                    kind: SessionMessageKind::TurnSummary,
+                    state: SessionMessageState::Resolved,
+                    turn_id: 0,
+                },
+            )
             .await
             .expect("failed to persist existing summary");
         let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
@@ -3452,7 +3490,12 @@ mod tests {
             sessions[0].title.as_deref(),
             Some("Refine session commit message")
         );
-        assert_eq!(sessions[0].summary.as_deref(), Some(existing_summary));
+        let persisted_summary = database
+            .sessions()
+            .load_latest_session_message("session-id", SessionMessageKind::TurnSummary)
+            .await
+            .expect("failed to load summary");
+        assert_eq!(persisted_summary.as_deref(), Some(existing_summary));
         assert_eq!(
             app_event_rx.try_recv().ok(),
             Some(AppEvent::RefreshSessions)
@@ -3483,7 +3526,16 @@ mod tests {
         let commit_message = "Refine session commit message\n\n- Keep title in sync";
         database
             .sessions()
-            .update_session_summary("session-id", existing_summary)
+            .upsert_session_timeline_message(
+                "session-id",
+                crate::infra::db::SessionTimelineMessage {
+                    content: existing_summary,
+                    entry_key: "turn_summary:0",
+                    kind: SessionMessageKind::TurnSummary,
+                    state: SessionMessageState::Resolved,
+                    turn_id: 0,
+                },
+            )
             .await
             .expect("failed to persist existing summary");
 
@@ -3494,15 +3546,15 @@ mod tests {
             commit_message,
         )
         .await;
-        let sessions = database
+        let summary = database
             .sessions()
-            .load_sessions()
+            .load_latest_session_message("session-id", SessionMessageKind::TurnSummary)
             .await
-            .expect("failed to load sessions");
+            .expect("failed to load summary");
 
         // Assert
         assert_eq!(
-            sessions[0].summary.as_deref(),
+            summary.as_deref(),
             Some(
                 "# Summary\n\n- Session branch updates README.\n\n# Commit\n\nRefine session \
                  commit message\n\n- Keep title in sync"
@@ -4874,7 +4926,7 @@ mod tests {
             .await
             .expect("failed to set published upstream ref");
 
-        let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+        let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
         let branch_operation_lock = Arc::new(tokio::sync::Mutex::new(()));
         let temp_dir = tempdir().expect("failed to create temp dir");
         let folder = temp_dir.path().join("sess-rebase");
@@ -4925,30 +4977,7 @@ mod tests {
             "post-rebase auto-push should retain branch-operation ownership"
         );
         release_push.notify_one();
-        let sync_events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            let mut sync_events = Vec::new();
-            while sync_events.len() < 2 {
-                let event = app_event_rx.recv().await.expect("missing app event");
-                if let AppEvent::PublishedBranchSyncUpdated {
-                    session_id,
-                    sync_operation_id,
-                    sync_status,
-                } = event
-                {
-                    sync_events.push((session_id, sync_operation_id, sync_status));
-                }
-            }
-
-            sync_events
-        })
-        .await
-        .expect("timed out waiting for sync events");
-
-        assert_eq!(sync_events[0].0, "sess-rebase");
-        assert_eq!(sync_events[0].2, PublishedBranchSyncStatus::InProgress);
-        assert_eq!(sync_events[1].0, "sess-rebase");
-        assert_eq!(sync_events[1].2, PublishedBranchSyncStatus::Succeeded);
-        assert_eq!(sync_events[0].1, sync_events[1].1);
+        wait_for_timeline_text(&transcript, "[Branch Push]").await;
 
         let transcript_text = transcript
             .lock()
@@ -5127,23 +5156,26 @@ mod tests {
         mock_review_request_client
     }
 
-    /// Collects the in-progress and terminal published-branch sync states.
-    async fn collect_published_branch_sync_statuses(
-        app_event_rx: &mut mpsc::UnboundedReceiver<AppEvent>,
-    ) -> Vec<PublishedBranchSyncStatus> {
+    /// Waits until one detached workflow updates the shared timeline.
+    async fn wait_for_timeline_text(
+        transcript: &Arc<Mutex<SessionTranscript>>,
+        expected_text: &str,
+    ) {
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            let mut sync_events = Vec::new();
-            while sync_events.len() < 2 {
-                let event = app_event_rx.recv().await.expect("missing app event");
-                if let AppEvent::PublishedBranchSyncUpdated { sync_status, .. } = event {
-                    sync_events.push(sync_status);
+            loop {
+                let contains_text = transcript
+                    .lock()
+                    .ok()
+                    .and_then(|transcript| transcript.replay_text())
+                    .is_some_and(|text| text.contains(expected_text));
+                if contains_text {
+                    return;
                 }
+                tokio::task::yield_now().await;
             }
-
-            sync_events
         })
         .await
-        .expect("timed out waiting for sync events")
+        .expect("timed out waiting for timeline text");
     }
 
     #[tokio::test]
@@ -5153,7 +5185,7 @@ mod tests {
         // Arrange
         let db = AppRepositories::in_memory().await;
         insert_published_rebase_session_with_review_request(&db).await;
-        let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+        let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
         let temp_dir = tempdir().expect("failed to create temp dir");
         let folder = temp_dir.path().join("sess-rebase");
         let session_update_versions = Arc::default();
@@ -5188,7 +5220,7 @@ mod tests {
             transcript: &transcript,
         })
         .await;
-        let sync_events = collect_published_branch_sync_statuses(&mut app_event_rx).await;
+        wait_for_timeline_text(&transcript, "[Branch Push]").await;
         let review_request = db
             .reviews()
             .load_session_review_request("sess-rebase")
@@ -5197,13 +5229,6 @@ mod tests {
             .expect("review request should remain linked");
 
         // Assert
-        assert_eq!(
-            sync_events,
-            vec![
-                PublishedBranchSyncStatus::InProgress,
-                PublishedBranchSyncStatus::Succeeded,
-            ]
-        );
         assert_eq!(review_request.title, "Refresh queued sync metadata");
     }
 
@@ -5214,7 +5239,7 @@ mod tests {
         // Arrange
         let db = AppRepositories::in_memory().await;
         insert_published_rebase_session_with_review_request(&db).await;
-        let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
+        let (app_event_tx, _app_event_rx) = mpsc::unbounded_channel();
         let temp_dir = tempdir().expect("failed to create temp dir");
         let folder = temp_dir.path().join("sess-rebase");
         let session_update_versions = Arc::default();
@@ -5272,7 +5297,7 @@ mod tests {
             transcript: &transcript,
         })
         .await;
-        let sync_events = collect_published_branch_sync_statuses(&mut app_event_rx).await;
+        wait_for_timeline_text(&transcript, "[Review Request Sync Warning]").await;
         let transcript_text = transcript
             .lock()
             .expect("transcript lock poisoned")
@@ -5280,13 +5305,6 @@ mod tests {
             .unwrap_or_default();
 
         // Assert
-        assert_eq!(
-            sync_events,
-            vec![
-                PublishedBranchSyncStatus::InProgress,
-                PublishedBranchSyncStatus::Succeeded,
-            ]
-        );
         assert!(transcript_text.contains("[Review Request Sync Warning]"));
         assert!(transcript_text.contains("commit message unavailable"));
     }
@@ -5349,23 +5367,14 @@ mod tests {
         })
         .await;
 
-        // Assert — no PublishedBranchSyncUpdated events should be emitted,
-        // but the stack-sync fan-out event should still be available.
+        // Assert
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let mut sync_event_count = 0;
         let mut stack_sync_event_count = 0;
         while let Ok(event) = app_event_rx.try_recv() {
-            if matches!(&event, AppEvent::PublishedBranchSyncUpdated { .. }) {
-                sync_event_count += 1;
-            }
             if matches!(&event, AppEvent::StackedParentSyncCompleted { .. }) {
                 stack_sync_event_count += 1;
             }
         }
-        assert_eq!(
-            sync_event_count, 0,
-            "should not emit sync events without published branch"
-        );
         assert_eq!(
             stack_sync_event_count, 1,
             "should emit one stacked parent sync completion event"

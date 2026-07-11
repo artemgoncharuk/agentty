@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use ag_protocol::AgentResponseSummary;
 use mockall::predicate::eq;
-use serde_json;
 use tempfile::tempdir;
 
 use super::*;
@@ -17,8 +16,8 @@ use crate::domain::agent::AgentModel;
 use crate::domain::file_entry::FileEntry;
 use crate::domain::question::QuestionItem;
 use crate::domain::session::{
-    ForgeKind, PublishedBranchSyncStatus, ReviewRequest, ReviewRequestState, ReviewRequestSummary,
-    SESSION_DATA_DIR, SessionFollowUpTask, SessionHandles, SessionSize, SessionStats, Status,
+    ForgeKind, ReviewRequest, ReviewRequestState, ReviewRequestSummary, SESSION_DATA_DIR,
+    SessionFollowUpTask, SessionHandles, SessionSize, SessionStats, Status,
 };
 use crate::domain::session_message::SessionTranscript;
 use crate::domain::setting::SettingName;
@@ -31,7 +30,7 @@ use crate::presentation::app_mode::ConfirmationViewMode;
 fn test_turn_applied_state(
     questions: Vec<QuestionItem>,
     follow_up_tasks: Vec<&str>,
-    summary: Option<AgentResponseSummary>,
+    _summary: Option<AgentResponseSummary>,
     token_usage_delta: SessionStats,
 ) -> TurnAppliedState {
     TurnAppliedState {
@@ -46,7 +45,6 @@ fn test_turn_applied_state(
             })
             .collect(),
         questions,
-        summary: summary.and_then(|summary| serde_json::to_string(&summary).ok()),
         token_usage_delta,
     }
 }
@@ -2083,8 +2081,8 @@ fn app_event_batch_collect_event_merges_agent_response_token_usage() {
     // Assert
     let merged_turn = event_batch.applied_turns.get("session-1");
     assert_eq!(
-        merged_turn.map(|turn| turn.questions.clone()),
-        Some(latest_turn.questions.clone())
+        merged_turn.map(|turn| &turn.questions),
+        Some(&latest_turn.questions)
     );
     assert_eq!(
         merged_turn.map(|turn| {
@@ -2094,10 +2092,6 @@ fn app_event_batch_collect_event_merges_agent_response_token_usage() {
                 .collect::<Vec<_>>()
         }),
         Some(vec!["Document the batched reducer path.".to_string()])
-    );
-    assert_eq!(
-        merged_turn.and_then(|turn| turn.summary.as_deref()),
-        latest_turn.summary.as_deref()
     );
     assert_eq!(
         merged_turn.map(|turn| turn.token_usage_delta.input_tokens),
@@ -2489,8 +2483,7 @@ async fn apply_app_events_records_system_log_events() {
 }
 
 #[tokio::test]
-/// Verifies workflow notices append to in-memory session state without
-/// changing persisted transcript messages.
+/// Verifies workflow notices append to the session timeline in event order.
 async fn apply_app_events_session_workflow_notice_updates_session_state() {
     // Arrange
     let mut app = crate::test_support::new_test_app_with_tmux_client_without_retained_base_dir(
@@ -2500,10 +2493,13 @@ async fn apply_app_events_session_workflow_notice_updates_session_state() {
     let mut session =
         crate::test_support::session_fixture_with_folder(PathBuf::from("/tmp/session-review"));
     session.id = "session-1".into();
-    session.transcript = Some(crate::test_support::assistant_transcript(
-        "assistant output",
-    ));
+    let transcript = crate::test_support::assistant_transcript("assistant output");
+    session.transcript = Some(transcript.clone());
     app.sessions.push_session(session);
+    app.sessions.session_handles_mut().insert(
+        "session-1".into(),
+        SessionHandles::new_with_transcript(Status::Review, transcript),
+    );
     app.services
         .event_sender()
         .send(AppEvent::SessionWorkflowNoticeUpdated {
@@ -2527,20 +2523,14 @@ async fn apply_app_events_session_workflow_notice_updates_session_state() {
         .iter()
         .find(|session| session.id == "session-1")
         .expect("session should exist");
-    assert_eq!(
-        session.workflow_notice.as_deref(),
-        Some(
-            "[Commit] No changes to commit.\n\n[Merge] Successfully merged wt/session-1 into main"
-        )
-    );
-    assert_eq!(
-        session
-            .transcript
-            .as_ref()
-            .and_then(SessionTranscript::replay_text)
-            .as_deref(),
-        Some("assistant output\n\n")
-    );
+    let transcript = session
+        .transcript
+        .as_ref()
+        .and_then(SessionTranscript::replay_text)
+        .unwrap_or_default();
+    assert!(transcript.contains("assistant output"));
+    assert!(transcript.contains("[Commit] No changes to commit."));
+    assert!(transcript.contains("[Merge] Successfully merged"));
     assert!(app.needs_redraw());
 }
 
@@ -3220,47 +3210,6 @@ async fn apply_app_events_agent_response_keeps_list_mode_when_not_viewing_sessio
 }
 
 #[tokio::test]
-/// Verifies reducer-applied turn projections update the cached session
-/// summary immediately.
-async fn apply_app_events_agent_response_updates_session_summary() {
-    // Arrange
-    let mut app = crate::test_support::new_test_app_with_tmux_client_without_retained_base_dir(
-        Arc::new(MockTmuxClient::new()),
-    )
-    .await;
-    app.sessions
-        .push_session(crate::test_support::session_fixture_with_folder(
-            PathBuf::from("/tmp/session-summary-view"),
-        ));
-    let expected_summary = serde_json::to_string(&AgentResponseSummary {
-        turn: "- Added structured protocol summary fields.".to_string(),
-        session: "- Session output now renders persisted summary separately.".to_string(),
-    })
-    .expect("summary should serialize");
-
-    // Act
-    app.apply_app_events(AppEvent::AgentResponseReceived {
-        session_id: "session-1".into(),
-        turn_applied_state: test_turn_applied_state(
-            Vec::new(),
-            Vec::new(),
-            Some(AgentResponseSummary {
-                turn: "- Added structured protocol summary fields.".to_string(),
-                session: "- Session output now renders persisted summary separately.".to_string(),
-            }),
-            SessionStats::default(),
-        ),
-    })
-    .await;
-
-    // Assert
-    assert_eq!(
-        app.sessions.sessions()[0].summary.as_deref(),
-        Some(expected_summary.as_str())
-    );
-}
-
-#[tokio::test]
 /// Verifies agent responses update cached follow-up tasks immediately for
 /// the active session.
 async fn apply_app_events_agent_response_updates_session_follow_up_tasks() {
@@ -3302,85 +3251,6 @@ async fn apply_app_events_agent_response_updates_session_follow_up_tasks() {
         ]
     );
 }
-#[tokio::test]
-/// Verifies stale published-branch sync completions do not overwrite the
-/// latest in-progress auto-push state.
-async fn apply_app_events_ignores_stale_published_branch_sync_updates() {
-    // Arrange
-    let mut app = crate::test_support::new_test_app_with_tmux_client_without_retained_base_dir(
-        Arc::new(MockTmuxClient::new()),
-    )
-    .await;
-    app.sessions
-        .push_session(crate::test_support::session_fixture_with_folder(
-            PathBuf::from("/tmp/session-branch-sync-view"),
-        ));
-
-    // Act
-    app.apply_app_events(AppEvent::PublishedBranchSyncUpdated {
-        session_id: "session-1".into(),
-        sync_operation_id: "sync-1".to_string(),
-        sync_status: PublishedBranchSyncStatus::InProgress,
-    })
-    .await;
-    app.apply_app_events(AppEvent::PublishedBranchSyncUpdated {
-        session_id: "session-1".into(),
-        sync_operation_id: "sync-2".to_string(),
-        sync_status: PublishedBranchSyncStatus::InProgress,
-    })
-    .await;
-    app.apply_app_events(AppEvent::PublishedBranchSyncUpdated {
-        session_id: "session-1".into(),
-        sync_operation_id: "sync-1".to_string(),
-        sync_status: PublishedBranchSyncStatus::Failed,
-    })
-    .await;
-
-    // Assert
-    assert_eq!(
-        app.sessions.sessions()[0].published_branch_sync_status,
-        PublishedBranchSyncStatus::InProgress
-    );
-}
-
-#[tokio::test]
-/// Verifies one reducer tick preserves a completed auto-push message even
-/// when start and success updates are drained together.
-async fn apply_app_events_preserves_completed_published_branch_sync_updates() {
-    // Arrange
-    let mut app = crate::test_support::new_test_app_with_tmux_client_without_retained_base_dir(
-        Arc::new(MockTmuxClient::new()),
-    )
-    .await;
-    let event_sender = app.services.event_sender();
-    app.sessions
-        .push_session(crate::test_support::session_fixture_with_folder(
-            PathBuf::from("/tmp/session-branch-sync-success"),
-        ));
-
-    event_sender
-        .send(AppEvent::PublishedBranchSyncUpdated {
-            session_id: "session-1".into(),
-            sync_operation_id: "sync-1".to_string(),
-            sync_status: PublishedBranchSyncStatus::Succeeded,
-        })
-        .expect("queued event should send");
-
-    // Act
-    app.apply_app_events(AppEvent::PublishedBranchSyncUpdated {
-        session_id: "session-1".into(),
-        sync_operation_id: "sync-1".to_string(),
-        sync_status: PublishedBranchSyncStatus::InProgress,
-    })
-    .await;
-
-    // Assert
-    assert_eq!(
-        app.sessions.sessions()[0].published_branch_sync_status,
-        PublishedBranchSyncStatus::Succeeded
-    );
-}
-
 #[tokio::test]
 /// Verifies reducer-applied turn projections clear stale questions and add
 /// token deltas to cached session stats.

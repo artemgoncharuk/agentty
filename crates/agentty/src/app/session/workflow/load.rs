@@ -10,10 +10,12 @@ use crate::app::SessionManager;
 use crate::domain::agent::{AgentSelection, ReasoningLevel, parse_persisted_session_agent_model};
 use crate::domain::question::QuestionItem;
 use crate::domain::session::{
-    DailyActivity, PublishedBranchSyncStatus, ReviewRequest, ReviewRequestSummary, Session,
-    SessionFollowUpTask, SessionHandles, SessionId, SessionSize, SessionStats, Status,
+    DailyActivity, ReviewRequest, ReviewRequestSummary, Session, SessionFollowUpTask,
+    SessionHandles, SessionId, SessionSize, SessionStats, Status,
 };
-use crate::domain::session_message::{SessionMessage, SessionMessageKind, SessionTranscript};
+use crate::domain::session_message::{
+    SessionMessage, SessionMessageKind, SessionMessageState, SessionTranscript,
+};
 use crate::infra::db::{
     AppRepositories, DbError, SessionDetailRow, SessionListRow, SessionMessageRow,
 };
@@ -50,7 +52,6 @@ struct LoadedSessionInput {
     session_prompt: String,
     session_queued_messages: Vec<String>,
     session_questions: Vec<QuestionItem>,
-    session_summary: Option<String>,
     session_status: Status,
     session_transcript: Option<SessionTranscript>,
     size: SessionSize,
@@ -231,7 +232,6 @@ impl SessionManager {
                 .unwrap_or_default(),
             session_queued_messages,
             session_questions: questions,
-            session_summary: session_detail.and_then(|detail| detail.summary),
             session_status,
             session_transcript,
             size: persisted_size,
@@ -306,7 +306,6 @@ impl SessionManager {
             queued_messages: input.session_queued_messages,
             reasoning_level_override: input.reasoning_level_override,
             published_upstream_ref: input.row.published_upstream_ref,
-            published_branch_sync_status: PublishedBranchSyncStatus::Idle,
             questions: input.session_questions,
             review_request: input.review_request,
             size: input.size,
@@ -317,11 +316,9 @@ impl SessionManager {
                 output_tokens: input.row.output_tokens.cast_unsigned(),
             },
             status: input.session_status,
-            summary: input.session_summary,
             title: input.row.title,
             transcript: input.session_transcript,
             updated_at: input.row.updated_at,
-            workflow_notice: None,
         }
     }
 
@@ -349,7 +346,6 @@ impl SessionManager {
         if let Some(questions) = detail.questions {
             session.questions = parse_questions_json(&questions).unwrap_or_default();
         }
-        session.summary = detail.summary;
         session.transcript = session_transcript;
     }
 }
@@ -440,10 +436,18 @@ fn sync_handle_transcript_with_loaded(
     let Ok(mut handle_transcript) = handles.transcript.lock() else {
         return None;
     };
-    if handle_transcript.is_empty()
-        && let Some(loaded_transcript) = loaded_transcript
-    {
-        handle_transcript.clone_from(loaded_transcript);
+    if let Some(loaded_transcript) = loaded_transcript {
+        if handle_transcript.is_empty() {
+            handle_transcript.clone_from(loaded_transcript);
+        } else {
+            for message in loaded_transcript
+                .messages()
+                .iter()
+                .filter(|message| message.entry_key.is_some())
+            {
+                handle_transcript.upsert_timeline_message(message.clone());
+            }
+        }
     }
     if handle_transcript.is_empty() {
         return None;
@@ -457,10 +461,14 @@ fn sync_handle_transcript_with_loaded(
 fn session_messages_from_rows(rows: Vec<SessionMessageRow>) -> Vec<SessionMessage> {
     rows.into_iter()
         .filter_map(|row| {
-            row.kind
-                .parse::<SessionMessageKind>()
-                .ok()
-                .map(|kind| SessionMessage::new(row.position, kind, row.content))
+            let kind = row.kind.parse::<SessionMessageKind>().ok()?;
+            let state = row.state.parse::<SessionMessageState>().ok()?;
+            let mut message = SessionMessage::new(row.position, kind, row.content);
+            message.entry_key = row.entry_key;
+            message.state = state;
+            message.turn_id = row.turn_id;
+
+            Some(message)
         })
         .collect()
 }
@@ -788,7 +796,16 @@ mod tests {
             .await
             .expect("failed to update session questions");
         db.sessions()
-            .update_session_summary(session_id, "persisted summary")
+            .upsert_session_timeline_message(
+                session_id,
+                crate::infra::db::SessionTimelineMessage {
+                    content: "persisted summary",
+                    entry_key: "turn_summary:0",
+                    kind: SessionMessageKind::TurnSummary,
+                    state: SessionMessageState::Resolved,
+                    turn_id: 0,
+                },
+            )
             .await
             .expect("failed to update session summary");
         db.sessions()
@@ -831,7 +848,11 @@ mod tests {
             .find(|session| session.id == session_id)
             .expect("missing reloaded session");
         assert_eq!(
-            session_replay_text(session),
+            session
+                .transcript
+                .as_ref()
+                .and_then(SessionTranscript::conversation_replay_text)
+                .unwrap_or_default(),
             assistant_replay_text("Live Output")
         );
         assert_eq!(session.prompt, "persisted prompt");
@@ -842,7 +863,7 @@ mod tests {
                 text: "persisted question?".to_string(),
             }]
         );
-        assert_eq!(session.summary.as_deref(), Some("persisted summary"));
+        assert_eq!(session.latest_summary(), Some("persisted summary"));
     }
 
     /// Ensures inactive session refresh skips transcript-scale fields.
@@ -876,7 +897,16 @@ mod tests {
             .await
             .expect("failed to update questions");
         db.sessions()
-            .update_session_summary(session_id, "large summary")
+            .upsert_session_timeline_message(
+                session_id,
+                crate::infra::db::SessionTimelineMessage {
+                    content: "large summary",
+                    entry_key: "turn_summary:0",
+                    kind: SessionMessageKind::TurnSummary,
+                    state: SessionMessageState::Resolved,
+                    turn_id: 0,
+                },
+            )
             .await
             .expect("failed to update summary");
         db.sessions()
@@ -913,7 +943,7 @@ mod tests {
         assert_eq!(session_replay_text(session), "");
         assert!(session.prompt.is_empty());
         assert!(session.questions.is_empty());
-        assert!(session.summary.is_none());
+        assert!(session.latest_summary().is_none());
 
         let handle = handles.get(session_id).expect("missing runtime handle");
         let handle_output = handle

@@ -1033,14 +1033,11 @@ where
     let terminal_size = terminal.size().map_err(crate::runtime::backend_err)?;
     let view_height = terminal_size.height.saturating_sub(5);
     let output_width = terminal_size.width.saturating_sub(2);
-    let (review_status_message, review_text) = app.review_view_state(&view_context.session_id);
     let total_lines = session_output_metric::rendered_output_line_count_with_cache(
         app,
         render_cache_store,
         &view_context.session_id,
         view_context.session_index,
-        review_status_message.as_deref(),
-        review_text,
         output_width,
     );
 
@@ -1157,13 +1154,22 @@ async fn open_review_output_mode(app: &mut App, view_context: &ViewContext) {
     let session_folder = session.folder.clone();
     let diff = load_view_session_diff(app, view_context).await;
     if diff.trim().is_empty() {
+        let diff_hash = diff_content_hash(&diff);
         app.review_cache.insert(
             view_context.session_id.clone(),
             ReviewCacheEntry::Ready {
-                diff_hash: diff_content_hash(&diff),
+                diff_hash,
                 text: REVIEW_NO_DIFF_MESSAGE.to_string(),
             },
         );
+        let _ = app
+            .post_focused_review_entry(
+                &view_context.session_id,
+                diff_hash,
+                REVIEW_NO_DIFF_MESSAGE,
+                crate::domain::session_message::SessionMessageState::Resolved,
+            )
+            .await;
 
         return;
     }
@@ -1174,9 +1180,17 @@ async fn open_review_output_mode(app: &mut App, view_context: &ViewContext) {
             view_context.session_id.clone(),
             ReviewCacheEntry::Ready {
                 diff_hash,
-                text: diff,
+                text: diff.clone(),
             },
         );
+        let _ = app
+            .post_focused_review_entry(
+                &view_context.session_id,
+                diff_hash,
+                &diff,
+                crate::domain::session_message::SessionMessageState::Failed,
+            )
+            .await;
 
         return;
     }
@@ -1187,10 +1201,7 @@ async fn open_review_output_mode(app: &mut App, view_context: &ViewContext) {
         ReviewCacheEntry::Loading { diff_hash },
     );
     let _ = app
-        .services
-        .db()
-        .sessions()
-        .update_session_focused_review(&view_context.session_id, None, None)
+        .post_focused_review_pending(&view_context.session_id, diff_hash)
         .await;
     app.start_review_assist(&view_context.session_id, &session_folder, diff_hash, &diff);
 }
@@ -1270,7 +1281,9 @@ mod tests {
     use super::*;
     use crate::app::review_loading_message;
     use crate::domain::agent::AgentModel;
-    use crate::domain::session_message::{SessionMessage, SessionMessageKind, SessionTranscript};
+    use crate::domain::session_message::{
+        SessionMessage, SessionMessageKind, SessionMessageState, SessionTranscript,
+    };
     use crate::infra::tmux::{MockTmuxClient, TmuxClient};
     use crate::ui::component::session_output::SessionOutputLineContext;
     use crate::ui::page::session_chat::SessionChatPage;
@@ -1863,7 +1876,7 @@ mod tests {
 
         // Act
         let total_lines =
-            session_output_metric::rendered_output_line_count(&app, &session_id, 0, None, None, 20);
+            session_output_metric::rendered_output_line_count(&app, &session_id, 0, 20);
 
         // Assert
         assert!(total_lines > raw_line_count);
@@ -1932,8 +1945,6 @@ mod tests {
                 &app,
                 &session_id,
                 0,
-                None,
-                None,
                 20,
             ),
             view_height: 5,
@@ -2044,9 +2055,6 @@ mod tests {
             SessionOutputLineContext {
                 active_prompt_output: None,
                 active_progress: None,
-                review_model: AgentModel::ClaudeHaiku4520251001,
-                review_status_message: None,
-                review_text: None,
                 session_update_version: app.session_update_version(&session_id),
             },
             render_cache_store.markdown_render_cache(),
@@ -2054,14 +2062,8 @@ mod tests {
         );
 
         // Act
-        let total_lines = session_output_metric::rendered_output_line_count(
-            &app,
-            &session_id,
-            0,
-            None,
-            None,
-            output_width,
-        );
+        let total_lines =
+            session_output_metric::rendered_output_line_count(&app, &session_id, 0, output_width);
 
         // Assert
         assert_eq!(total_lines, expected);
@@ -2946,7 +2948,14 @@ mod tests {
             .find(|session| session.id == source_session_id)
             .expect("expected source session in session list");
         source_session.status = Status::Done;
-        source_session.summary = Some("# Summary\n\nKeep going.".to_string());
+        source_session.transcript = Some(SessionTranscript::new(vec![SessionMessage::timeline(
+            0,
+            0,
+            "turn_summary:0",
+            SessionMessageKind::TurnSummary,
+            SessionMessageState::Resolved,
+            "# Summary\n\nKeep going.",
+        )]));
         source_session.title = Some("Done source".to_string());
         app.mode = AppMode::View {
             session_id: source_session_id.clone().into(),

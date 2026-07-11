@@ -14,10 +14,8 @@ use crate::app::session::{
     Clock, SessionError, remote_branch_name_from_upstream_ref, unix_timestamp_from_system_time,
 };
 use crate::app::{AppEvent, branch_publish};
-use crate::domain::session::{
-    PublishBranchAction, PublishedBranchSyncStatus, ReviewRequest, ReviewRequestState, SessionId,
-};
-use crate::domain::session_message::SessionTranscript;
+use crate::domain::session::{PublishBranchAction, ReviewRequest, ReviewRequestState, SessionId};
+use crate::domain::session_message::{SessionMessageKind, SessionMessageState, SessionTranscript};
 use crate::domain::transcript_notice::TranscriptNotice;
 use crate::infra::db::AppRepositories;
 
@@ -51,9 +49,10 @@ pub(super) struct PublishedBranchAutoPushStartInput {
 
 /// Starts one detached auto-push task for a session that already tracks a
 /// published upstream branch.
-pub(super) fn start_published_branch_auto_push(input: PublishedBranchAutoPushStartInput) {
+pub(super) async fn start_published_branch_auto_push(input: PublishedBranchAutoPushStartInput) {
     let branch_operation_guard = input.branch_operation_guard;
     let sync_operation_id = Uuid::new_v4().to_string();
+    let entry_key = format!("branch_push:{sync_operation_id}");
     let review_request_metadata_sync =
         input
             .review_request_commit_message
@@ -63,25 +62,45 @@ pub(super) fn start_published_branch_auto_push(input: PublishedBranchAutoPushSta
                 review_request_client: Arc::clone(&input.review_request_client),
             });
 
-    let _ = input
-        .app_event_tx
-        .send(AppEvent::PublishedBranchSyncUpdated {
-            session_id: input.session_id.clone(),
-            sync_operation_id: sync_operation_id.clone(),
-            sync_status: PublishedBranchSyncStatus::InProgress,
-        });
+    let turn_id = input
+        .transcript
+        .lock()
+        .map_or(0, |transcript| transcript.current_turn_id());
+    if let Err(error) = SessionTaskService::upsert_timeline_message(
+        &input.transcript,
+        &input.db,
+        &input.app_event_tx,
+        &input.session_update_versions,
+        &input.session_id,
+        super::task::SessionTimelineMessageUpdate {
+            content: "Auto-pushing published branch after completed turn...",
+            entry_key: &entry_key,
+            kind: SessionMessageKind::WorkflowNotice,
+            state: SessionMessageState::Pending,
+            turn_id,
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            session_id = %input.session_id,
+            %error,
+            "failed to post published-branch timeline entry"
+        );
+    }
 
     let auto_push_input = PublishedBranchAutoPushInput {
         app_event_tx: input.app_event_tx,
         db: input.db,
+        entry_key,
         folder: input.folder,
         git_client: input.git_client,
         published_upstream_ref: input.published_upstream_ref,
         review_request_metadata_sync,
         session_id: input.session_id,
         session_update_versions: input.session_update_versions,
-        sync_operation_id,
         transcript: input.transcript,
+        turn_id,
     };
     tokio::spawn(async move {
         let _branch_operation_guard = branch_operation_guard;
@@ -96,6 +115,8 @@ pub(super) struct PublishedBranchAutoPushInput {
     pub(super) app_event_tx: mpsc::UnboundedSender<AppEvent>,
     /// Repository bundle used to resolve and persist branch-publish state.
     pub(super) db: AppRepositories,
+    /// Stable timeline identity replaced when the push completes.
+    pub(super) entry_key: String,
     /// Session worktree folder pushed to its tracked upstream branch.
     pub(super) folder: PathBuf,
     /// Git boundary used for the remote push operation.
@@ -108,10 +129,10 @@ pub(super) struct PublishedBranchAutoPushInput {
     pub(super) session_id: SessionId,
     /// Per-app session update versions shared with the main runtime.
     pub(super) session_update_versions: crate::app::service::SessionUpdateVersionMap,
-    /// Auto-push operation id used to ignore stale completion updates.
-    pub(super) sync_operation_id: String,
     /// Shared typed transcript snapshot mirrored to the render layer.
     pub(super) transcript: Arc<Mutex<SessionTranscript>>,
+    /// Turn that owned the push when its pending row was inserted.
+    pub(super) turn_id: i64,
 }
 
 /// Owned dependencies for one optional linked PR/MR metadata sync after push.
@@ -152,43 +173,39 @@ async fn run_published_branch_auto_push_task(input: PublishedBranchAutoPushInput
 
             let message = TranscriptNotice::BranchPush
                 .format("Auto-pushed published branch after completed turn.");
-            SessionTaskService::append_workflow_notice(
+            let _ = SessionTaskService::upsert_timeline_message(
                 &input.transcript,
                 &input.db,
                 &input.app_event_tx,
                 &input.session_update_versions,
                 &input.session_id,
-                &message,
+                super::task::SessionTimelineMessageUpdate {
+                    content: &message,
+                    entry_key: &input.entry_key,
+                    kind: SessionMessageKind::WorkflowNotice,
+                    state: SessionMessageState::Resolved,
+                    turn_id: input.turn_id,
+                },
             )
             .await;
-
-            let _ = input
-                .app_event_tx
-                .send(AppEvent::PublishedBranchSyncUpdated {
-                    session_id: input.session_id,
-                    sync_operation_id: input.sync_operation_id,
-                    sync_status: PublishedBranchSyncStatus::Succeeded,
-                });
         }
         Err(failure) => {
             let message = TranscriptNotice::BranchPushError.format(failure.message);
-            SessionTaskService::append_workflow_notice(
+            let _ = SessionTaskService::upsert_timeline_message(
                 &input.transcript,
                 &input.db,
                 &input.app_event_tx,
                 &input.session_update_versions,
                 &input.session_id,
-                &message,
+                super::task::SessionTimelineMessageUpdate {
+                    content: &message,
+                    entry_key: &input.entry_key,
+                    kind: SessionMessageKind::WorkflowNotice,
+                    state: SessionMessageState::Failed,
+                    turn_id: input.turn_id,
+                },
             )
             .await;
-
-            let _ = input
-                .app_event_tx
-                .send(AppEvent::PublishedBranchSyncUpdated {
-                    session_id: input.session_id,
-                    sync_operation_id: input.sync_operation_id,
-                    sync_status: PublishedBranchSyncStatus::Failed,
-                });
         }
     }
 }

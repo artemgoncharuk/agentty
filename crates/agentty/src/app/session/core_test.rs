@@ -27,10 +27,10 @@ use crate::domain::selection::SelectionState;
 use crate::domain::session::{
     DailyActivity, SESSION_DATA_DIR, Session, SessionHandles, SessionSize, SessionStats, Status,
 };
-use crate::domain::session_message::SessionTranscript;
+use crate::domain::session_message::{SessionMessageKind, SessionMessageState, SessionTranscript};
 use crate::domain::setting::SettingName;
 use crate::infra::clock::RealClock;
-use crate::infra::db::AppRepositories;
+use crate::infra::db::{AppRepositories, SessionTimelineMessage};
 use crate::infra::fs::{self as fs, FsClient};
 use crate::presentation::app_mode::AppMode;
 use crate::ui::activity_heatmap;
@@ -646,17 +646,14 @@ fn add_manual_session_with_status(
         queued_messages: Vec::new(),
         reasoning_level_override: None,
         published_upstream_ref: None,
-        published_branch_sync_status: crate::domain::session::PublishedBranchSyncStatus::Idle,
         questions: Vec::new(),
         review_request: None,
         size: SessionSize::Xs,
         stats: SessionStats::default(),
         status,
-        summary: None,
         title: Some(prompt.to_string()),
         transcript: None,
         updated_at: 0,
-        workflow_notice: None,
     });
     if app.sessions.selected_session_index().is_none() {
         app.sessions.select_session_index(Some(0));
@@ -706,17 +703,14 @@ fn test_session_manager_with_clock(
             queued_messages: Vec::new(),
             reasoning_level_override,
             published_upstream_ref: None,
-            published_branch_sync_status: crate::domain::session::PublishedBranchSyncStatus::Idle,
             questions: Vec::new(),
             review_request: None,
             size: SessionSize::Xs,
             stats: SessionStats::default(),
             status: Status::Review,
-            summary: None,
             title: Some("Title".to_string()),
             transcript: None,
             updated_at: 0,
-            workflow_notice: None,
         }],
         crate::domain::selection::SelectionState::default(),
         clock,
@@ -848,7 +842,6 @@ async fn test_apply_turn_applied_state_clears_active_prompt_output() {
         &TurnAppliedState {
             follow_up_tasks: Vec::new(),
             questions: Vec::new(),
-            summary: None,
             token_usage_delta: SessionStats::default(),
         },
     );
@@ -3822,18 +3815,12 @@ async fn test_spawn_session_task_auto_commits_changes() {
     app.process_pending_app_events().await;
     app.sessions.sync_from_handles();
 
-    // Assert — commit completion details are transient workflow notice
-    // state, not persisted transcript output.
+    // Assert
     let session = &app.sessions.sessions()[0];
     let output = session_replay_text(session);
-    let workflow_notice = session.workflow_notice.as_deref();
     assert!(
-        !output.contains("[Commit] committed with hash"),
-        "commit completion should not be persisted, got: {output}"
-    );
-    assert_eq!(
-        workflow_notice,
-        Some("[Commit] committed with hash `abc1234`")
+        output.contains("[Commit] committed with hash `abc1234`"),
+        "commit completion should be persisted, got: {output}"
     );
 }
 
@@ -3985,15 +3972,13 @@ async fn test_spawn_session_task_skips_commit_when_nothing_to_commit() {
     app.process_pending_app_events().await;
     app.sessions.sync_from_handles();
 
-    // Assert — no-op commit output is visible as transient workflow state.
+    // Assert
     let session = &app.sessions.sessions()[0];
     let output = session_replay_text(session);
-    let workflow_notice = session.workflow_notice.as_deref();
     assert!(
-        !output.contains("[Commit] No changes to commit."),
-        "no-op commit output should not be persisted when nothing to commit"
+        output.contains("[Commit] No changes to commit."),
+        "no-op commit output should be persisted in the turn timeline"
     );
-    assert_eq!(workflow_notice, Some("[Commit] No changes to commit."));
     assert!(
         !output.contains("[Commit Error]"),
         "should not contain commit error when nothing to commit"
@@ -4538,10 +4523,15 @@ async fn test_rebase_session_cancels_pending_focused_review() {
         .expect("failed to create session");
     let db = app.services.db().clone();
     db.sessions()
-        .update_session_focused_review(
+        .upsert_session_timeline_message(
             &session_id,
-            Some("111".to_string()),
-            Some("old persisted focused review".to_string()),
+            SessionTimelineMessage {
+                content: "Reviewing changes",
+                entry_key: "focused_review:777",
+                kind: SessionMessageKind::FocusedReview,
+                state: SessionMessageState::Pending,
+                turn_id: 0,
+            },
         )
         .await
         .expect("failed to seed persisted focused review");
@@ -4591,10 +4581,15 @@ async fn test_rebase_session_cleanup_failure_does_not_start_sync() {
         .await
         .expect("failed to create session");
     db.sessions()
-        .update_session_focused_review(
+        .upsert_session_timeline_message(
             &session_id,
-            Some("111".to_string()),
-            Some("old persisted focused review".to_string()),
+            SessionTimelineMessage {
+                content: "Reviewing changes",
+                entry_key: "focused_review:777",
+                kind: SessionMessageKind::FocusedReview,
+                state: SessionMessageState::Pending,
+                turn_id: 0,
+            },
         )
         .await
         .expect("failed to seed persisted focused review");

@@ -941,9 +941,8 @@ impl App {
 
     /// Submits the initial prompt for a newly created session.
     ///
-    /// Starting a new turn clears cached and persisted focused-review output
-    /// for that session so review text does not bleed into the next prompt
-    /// cycle.
+    /// Starting a new turn clears only actionable focused-review cache state;
+    /// resolved review timeline entries remain attached to their owning turn.
     ///
     /// # Errors
     /// Returns an error if the session is missing or task enqueue fails.
@@ -953,11 +952,6 @@ impl App {
         prompt: impl Into<TurnPrompt>,
     ) -> Result<(), AppError> {
         self.review_cache.remove(session_id);
-        self.services
-            .db()
-            .sessions()
-            .update_session_focused_review(session_id, None, None)
-            .await?;
 
         Ok(self
             .sessions
@@ -991,11 +985,6 @@ impl App {
     /// stack consistency or launch enqueueing fails.
     pub async fn start_staged_session(&mut self, session_id: &str) -> Result<(), AppError> {
         self.review_cache.remove(session_id);
-        self.services
-            .db()
-            .sessions()
-            .update_session_focused_review(session_id, None, None)
-            .await?;
 
         Ok(self
             .sessions
@@ -1005,18 +994,11 @@ impl App {
 
     /// Submits a follow-up prompt for an existing session.
     ///
-    /// Starting a new turn clears cached and persisted focused-review output
-    /// for that session so review text does not persist past prompt
-    /// submission. Returns `true` when the reply command was enqueued on the
-    /// session worker.
+    /// Starting a new turn clears only actionable focused-review cache state.
+    /// Historical review entries remain in the session timeline. Returns
+    /// `true` when the reply command was enqueued on the session worker.
     pub async fn reply(&mut self, session_id: &str, prompt: impl Into<TurnPrompt>) -> bool {
         self.review_cache.remove(session_id);
-        let _ = self
-            .services
-            .db()
-            .sessions()
-            .update_session_focused_review(session_id, None, None)
-            .await;
 
         self.sessions
             .reply(&self.services, session_id, prompt)
@@ -1047,6 +1029,60 @@ impl App {
             session_id,
             self.settings.default_review_selection.model(),
         )
+    }
+
+    /// Posts the stable pending timeline entry used by manual focused-review
+    /// actions before their provider task starts.
+    pub(crate) async fn post_focused_review_pending(
+        &self,
+        session_id: &str,
+        diff_hash: u64,
+    ) -> Result<(), AppError> {
+        let content =
+            crate::app::review_loading_message(self.settings.default_review_selection.model());
+
+        self.post_focused_review_entry(
+            session_id,
+            diff_hash,
+            &content,
+            crate::domain::session_message::SessionMessageState::Pending,
+        )
+        .await
+    }
+
+    /// Posts or resolves one focused-review timeline entry.
+    pub(crate) async fn post_focused_review_entry(
+        &self,
+        session_id: &str,
+        diff_hash: u64,
+        content: &str,
+        state: crate::domain::session_message::SessionMessageState,
+    ) -> Result<(), AppError> {
+        let Some(handles) = self.sessions.state().handles().get(session_id) else {
+            return Ok(());
+        };
+        let entry_key = format!("focused_review:{diff_hash}");
+        let turn_id = handles
+            .transcript
+            .lock()
+            .map_or(0, |transcript| transcript.current_turn_id());
+        crate::app::session::SessionTaskService::upsert_timeline_message(
+            &handles.transcript,
+            self.services.db(),
+            &self.services.event_sender(),
+            &self.services.session_update_versions(),
+            session_id,
+            crate::app::session::SessionTimelineMessageUpdate {
+                content,
+                entry_key: &entry_key,
+                kind: crate::domain::session_message::SessionMessageKind::FocusedReview,
+                state,
+                turn_id,
+            },
+        )
+        .await?;
+
+        Ok(())
     }
 
     /// Persists and applies an agent/model selection for a session.
@@ -1400,11 +1436,21 @@ impl App {
             Some(ReviewCacheEntry::Loading { .. })
         );
         if should_clear_pending_review {
-            self.services
-                .db()
-                .sessions()
-                .update_session_focused_review(session_id, None, None)
-                .await?;
+            if let Some(ReviewCacheEntry::Loading { diff_hash }) = self.review_cache.get(session_id)
+            {
+                let entry_key = format!("focused_review:{diff_hash}");
+                if let Some(handles) = self.sessions.state().handles().get(session_id) {
+                    crate::app::session::SessionTaskService::delete_timeline_message(
+                        &handles.transcript,
+                        self.services.db(),
+                        &self.services.event_sender(),
+                        &self.services.session_update_versions(),
+                        session_id,
+                        &entry_key,
+                    )
+                    .await?;
+                }
+            }
             cancel_pending_review(&mut self.review_cache, session_id);
         }
 

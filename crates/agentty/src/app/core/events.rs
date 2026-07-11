@@ -3,6 +3,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use app::branch_publish::{
     BranchPublishActionUpdate, BranchPublishTaskResult, BranchPublishTaskSuccess,
@@ -16,7 +17,8 @@ use app::branch_publish::{
 };
 use app::reducer::AppEventReducer;
 use app::review::{
-    FocusedReviewPersistence, ReviewUpdate, apply_review_updates, auto_start_reviews,
+    AutoReviewContext, FocusedReviewPersistence, ReviewUpdate, apply_review_updates,
+    auto_start_reviews,
 };
 
 use super::state::{
@@ -32,9 +34,7 @@ use crate::domain::agent::AgentCliInfo;
 use crate::domain::file_entry::{FileEntry, at_mention_lookup_root};
 use crate::domain::input::InputState;
 use crate::domain::question::default_option_index;
-use crate::domain::session::{
-    PublishBranchAction, PublishedBranchSyncStatus, SessionId, SessionSize, Status,
-};
+use crate::domain::session::{PublishBranchAction, SessionId, SessionSize, Status};
 use crate::domain::system_log::{SystemLogCategory, SystemLogEvent, SystemLogLevel};
 use crate::domain::transcript_notice::TranscriptNotice;
 use crate::presentation::app_mode::{AppMode, ConfirmationViewMode, QuestionFocus};
@@ -185,13 +185,6 @@ pub(crate) enum AppEvent {
         notice: String,
         session_id: SessionId,
     },
-    /// Indicates that one published session branch started or finished a
-    /// background auto-push after a completed turn.
-    PublishedBranchSyncUpdated {
-        session_id: SessionId,
-        sync_operation_id: String,
-        sync_status: PublishedBranchSyncStatus,
-    },
     /// Indicates completion of one background review-request status refresh.
     ReviewRequestStatusUpdated {
         /// Sync-context generation used to reject stale completions.
@@ -219,7 +212,6 @@ pub(super) struct AppEventBatch {
     pub(super) branch_publish_action_update: Option<BranchPublishActionUpdate>,
     pub(super) git_status_update: Option<GitStatusBatchUpdate>,
     pub(super) latest_available_version_update: Option<LatestAvailableVersionUpdate>,
-    pub(super) published_branch_sync_updates: Vec<(SessionId, PublishedBranchSyncUpdate)>,
     pub(super) review_updates: HashMap<SessionId, ReviewUpdate>,
     pub(super) session_git_status_updates: HashMap<SessionId, SessionGitStatus>,
     pub(super) session_ids: HashSet<SessionId>,
@@ -270,14 +262,6 @@ pub(super) struct GitStatusBatchUpdate {
 pub(super) struct LatestAvailableVersionUpdate {
     /// Latest available version string, or `None` when no update is available.
     latest_available_version: Option<String>,
-}
-
-/// One ordered published-branch sync update queued for one session.
-pub(super) struct PublishedBranchSyncUpdate {
-    /// Operation identifier used to ignore stale terminal auto-push updates.
-    sync_operation_id: String,
-    /// Auto-push state carried by this update.
-    sync_status: PublishedBranchSyncStatus,
 }
 
 /// Completed review-request status refresh payload ready for reducer
@@ -424,15 +408,6 @@ impl AppEventBatch {
             AppEvent::SessionWorkflowNoticeUpdated { notice, session_id } => {
                 self.collect_session_workflow_notice_updated(session_id, notice);
             }
-            AppEvent::PublishedBranchSyncUpdated {
-                session_id,
-                sync_operation_id,
-                sync_status,
-            } => self.collect_published_branch_sync_updated(
-                session_id,
-                sync_operation_id,
-                sync_status,
-            ),
             AppEvent::ReviewRequestStatusUpdated {
                 generation,
                 result,
@@ -670,30 +645,6 @@ impl AppEventBatch {
         );
     }
 
-    /// Queues one published-branch sync state transition for ordered
-    /// reducer application.
-    fn collect_published_branch_sync_updated(
-        &mut self,
-        session_id: SessionId,
-        sync_operation_id: String,
-        sync_status: PublishedBranchSyncStatus,
-    ) {
-        if matches!(
-            sync_status,
-            PublishedBranchSyncStatus::Idle | PublishedBranchSyncStatus::Succeeded
-        ) {
-            self.should_refresh_git_status = true;
-        }
-
-        self.published_branch_sync_updates.push((
-            session_id,
-            PublishedBranchSyncUpdate {
-                sync_operation_id,
-                sync_status,
-            },
-        ));
-    }
-
     /// Queues one review-request status refresh result for reducer
     /// application.
     fn collect_review_request_status_updated(
@@ -860,22 +811,15 @@ impl App {
         for (session_id, turn_applied_state) in event_batch.applied_turns {
             self.apply_agent_response_received(&session_id, &turn_applied_state);
         }
-        for (session_id, sync_update) in event_batch.published_branch_sync_updates {
-            self.apply_published_branch_sync_update(&session_id, sync_update);
-        }
-
         if let Some(conflicted_files) = event_batch.sync_main_conflicted_files.as_deref() {
             self.apply_sync_main_conflict_resolution_started(conflicted_files);
         }
 
         self.sync_touched_sessions(&event_batch.session_ids);
-        for (session_id, notices) in
-            std::mem::take(&mut event_batch.session_workflow_notice_updates)
-        {
-            for notice in notices {
-                self.sessions.append_workflow_notice(&session_id, notice);
-            }
-        }
+        self.apply_session_workflow_notice_updates(std::mem::take(
+            &mut event_batch.session_workflow_notice_updates,
+        ))
+        .await;
         should_mark_dirty |= self
             .apply_stacked_parent_merge_child_rebases(std::mem::take(
                 &mut event_batch.stacked_parent_merge_child_rebases,
@@ -887,13 +831,18 @@ impl App {
                 std::mem::take(&mut event_batch.stacked_parent_turns_completed),
             )
             .await;
+        let auto_review_context = AutoReviewContext {
+            app_event_tx: self.services.event_sender(),
+            db: self.services.db().clone(),
+            git_client: self.services.git_client(),
+            review_selection: self.settings.default_review_selection,
+            session_update_versions: self.services.session_update_versions(),
+        };
         auto_start_reviews(
             &mut self.review_cache,
             &event_batch.session_ids,
             self.sessions.state_mut(),
-            self.services.git_client(),
-            self.services.event_sender(),
-            self.settings.default_review_selection,
+            auto_review_context,
         )
         .await;
 
@@ -1283,7 +1232,6 @@ impl App {
             || !event_batch.applied_turns.is_empty()
             || !event_batch.at_mention_entries_updates.is_empty()
             || event_batch.branch_publish_action_update.is_some()
-            || !event_batch.published_branch_sync_updates.is_empty()
             || !event_batch.review_request_status_updates.is_empty()
             || !event_batch.review_comment_session_ids.is_empty()
             || event_batch.requested_reviews.is_some()
@@ -1595,35 +1543,6 @@ impl App {
         }
     }
 
-    /// Routes one published-branch auto-push update to the matching in-memory
-    /// session snapshot.
-    fn apply_published_branch_sync_update(
-        &mut self,
-        session_id: &str,
-        sync_update: PublishedBranchSyncUpdate,
-    ) {
-        let PublishedBranchSyncUpdate {
-            sync_operation_id,
-            sync_status,
-        } = sync_update;
-
-        match sync_status {
-            PublishedBranchSyncStatus::InProgress => {
-                self.sessions
-                    .start_published_branch_sync(session_id, sync_operation_id);
-            }
-            PublishedBranchSyncStatus::Idle
-            | PublishedBranchSyncStatus::Succeeded
-            | PublishedBranchSyncStatus::Failed => {
-                self.sessions.finish_published_branch_sync(
-                    session_id,
-                    &sync_operation_id,
-                    sync_status,
-                );
-            }
-        }
-    }
-
     /// Returns the lookup root for the session associated with an at-mention
     /// event.
     fn at_mention_lookup_root(&self, session_id: &str) -> PathBuf {
@@ -1698,40 +1617,92 @@ impl App {
         );
     }
 
-    /// Persists successful focused reviews and clears stale saved review text
-    /// after failed regeneration attempts.
+    /// Resolves focused-review timeline entries in persistence and live state.
     async fn persist_focused_review_updates(
         &self,
         focused_review_persistence: Vec<FocusedReviewPersistence>,
     ) {
         for persistence_update in focused_review_persistence {
-            let diff_hash = persistence_update
-                .diff_hash
-                .map(|diff_hash| diff_hash.to_string());
+            let Some(handles) = self
+                .sessions
+                .state()
+                .handles()
+                .get(&persistence_update.session_id)
+            else {
+                continue;
+            };
+            let entry_key = format!("focused_review:{}", persistence_update.diff_hash);
+            let turn_id = handles.transcript.lock().map_or(0, |transcript| {
+                transcript
+                    .messages()
+                    .iter()
+                    .find(|message| message.entry_key.as_deref() == Some(entry_key.as_str()))
+                    .map_or_else(|| transcript.current_turn_id(), |message| message.turn_id)
+            });
+            let _ = crate::app::session::SessionTaskService::upsert_timeline_message(
+                &handles.transcript,
+                self.services.db(),
+                &self.services.event_sender(),
+                &self.services.session_update_versions(),
+                &persistence_update.session_id,
+                crate::app::session::SessionTimelineMessageUpdate {
+                    content: &persistence_update.text,
+                    entry_key: &entry_key,
+                    kind: crate::domain::session_message::SessionMessageKind::FocusedReview,
+                    state: persistence_update.state,
+                    turn_id,
+                },
+            )
+            .await;
+        }
+    }
 
-            let _ = self
-                .services
-                .db()
-                .sessions()
-                .update_session_focused_review(
-                    persistence_update.session_id.as_str(),
-                    diff_hash,
-                    persistence_update.text,
+    /// Applies durable workflow notices and resynchronizes their render
+    /// snapshots after the shared transcript handles change.
+    async fn apply_session_workflow_notice_updates(
+        &mut self,
+        notice_updates: HashMap<SessionId, Vec<String>>,
+    ) {
+        for (session_id, notices) in notice_updates {
+            let transcript = self
+                .sessions
+                .state()
+                .handles()
+                .get(&session_id)
+                .map(|handles| Arc::clone(&handles.transcript));
+            let Some(transcript) = transcript else {
+                continue;
+            };
+            for notice in notices {
+                crate::app::session::SessionTaskService::append_workflow_notice(
+                    &transcript,
+                    self.services.db(),
+                    &self.services.event_sender(),
+                    &self.services.session_update_versions(),
+                    &session_id,
+                    &notice,
                 )
                 .await;
+            }
+            self.sessions.sync_session_from_handle(&session_id);
         }
     }
 
     /// Starts focused review generation for sessions that just entered review.
     #[cfg(test)]
     pub(super) async fn auto_start_reviews(&mut self, session_ids: &HashSet<SessionId>) {
+        let auto_review_context = AutoReviewContext {
+            app_event_tx: self.services.event_sender(),
+            db: self.services.db().clone(),
+            git_client: self.services.git_client(),
+            review_selection: self.settings.default_review_selection,
+            session_update_versions: self.services.session_update_versions(),
+        };
         auto_start_reviews(
             &mut self.review_cache,
             session_ids,
             self.sessions.state_mut(),
-            self.services.git_client(),
-            self.services.event_sender(),
-            self.settings.default_review_selection,
+            auto_review_context,
         )
         .await;
     }

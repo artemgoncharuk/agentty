@@ -7,7 +7,9 @@ use sqlx::SqlitePool;
 use super::review::SessionReviewRequestRow;
 use crate::domain::agent::{AgentKind, AgentModel, ReasoningLevel};
 use crate::domain::session::{SessionFollowUpTask, SessionId, SessionStats};
-use crate::domain::session_message::{SessionMessageKind, stored_message_content};
+use crate::domain::session_message::{
+    SessionMessageKind, SessionMessageState, stored_message_content,
+};
 use crate::infra::db::DbError;
 
 /// Transactional turn-metadata payload persisted after one completed agent
@@ -28,10 +30,12 @@ pub struct SessionTurnMetadata {
     pub(crate) provider_conversation_id: Option<String>,
     /// Serialized clarification-question payload stored on the session row.
     pub(crate) questions_json: String,
-    /// Serialized structured summary payload stored on the session row.
+    /// Serialized structured summary payload stored in the session timeline.
     pub(crate) summary: String,
     /// Token-usage delta attributed to the completed turn.
     pub(crate) token_usage_delta: SessionStats,
+    /// Monotonic owning turn identifier for the summary entry.
+    pub(crate) turn_id: i64,
 }
 
 /// Borrowed values used to persist a newly created session with explicit
@@ -96,14 +100,13 @@ pub struct SessionRow {
     pub review_request: Option<SessionReviewRequestRow>,
     pub size: String,
     pub status: String,
-    pub summary: Option<String>,
     pub title: Option<String>,
     pub updated_at: i64,
 }
 
 /// Lightweight row returned when loading session-list metadata.
 ///
-/// Omits transcript-scale fields (`prompt`, `questions`, and `summary`) so
+/// Omits transcript-scale fields (`prompt` and `questions`) so
 /// list refreshes scale with visible metadata instead of the cumulative size
 /// of every saved conversation.
 pub struct SessionListRow {
@@ -158,8 +161,6 @@ pub struct SessionDetailRow {
     pub prompt: String,
     /// Serialized clarification-question payload, when present.
     pub questions: Option<String>,
-    /// Persisted structured summary text, when present.
-    pub summary: Option<String>,
 }
 
 /// Row returned when loading one persisted `session_message`.
@@ -167,10 +168,30 @@ pub struct SessionDetailRow {
 pub struct SessionMessageRow {
     /// Canonical transcript text for this message.
     pub content: String,
+    /// Stable producer identity for replace-in-place timeline entries.
+    pub entry_key: Option<String>,
     /// Stable message-kind string.
     pub kind: String,
     /// Monotonic position within the owning session transcript.
     pub position: i64,
+    /// Stable lifecycle-state string.
+    pub state: String,
+    /// Monotonic owning turn identifier.
+    pub turn_id: i64,
+}
+
+/// Borrowed values used to insert or replace one stable timeline entry.
+pub struct SessionTimelineMessage<'a> {
+    /// Canonical entry content.
+    pub content: &'a str,
+    /// Stable producer identity.
+    pub entry_key: &'a str,
+    /// Durable message category.
+    pub kind: SessionMessageKind,
+    /// Entry lifecycle state.
+    pub state: SessionMessageState,
+    /// Monotonic owning turn identifier.
+    pub turn_id: i64,
 }
 
 /// Row returned when loading one persisted `session_follow_up_task`.
@@ -221,6 +242,20 @@ pub trait SessionRepository: Send + Sync {
         id: &str,
         kind: SessionMessageKind,
         content: &str,
+    ) -> Result<(), DbError>;
+
+    /// Inserts or replaces one stable turn-scoped timeline entry.
+    async fn upsert_session_timeline_message(
+        &self,
+        id: &str,
+        message: SessionTimelineMessage<'_>,
+    ) -> Result<SessionMessageRow, DbError>;
+
+    /// Deletes one stable timeline entry, if present.
+    async fn delete_session_timeline_message(
+        &self,
+        id: &str,
+        entry_key: &str,
     ) -> Result<(), DbError>;
 
     /// Sets `project_id` for sessions that do not yet reference a project.
@@ -371,8 +406,12 @@ pub trait SessionRepository: Send + Sync {
         session_id: &str,
     ) -> Result<ReasoningLevel, DbError>;
 
-    /// Loads the persisted summary text associated with one session.
-    async fn load_session_summary(&self, session_id: &str) -> Result<Option<String>, DbError>;
+    /// Loads the latest resolved content for one timeline message kind.
+    async fn load_latest_session_message(
+        &self,
+        session_id: &str,
+        kind: SessionMessageKind,
+    ) -> Result<Option<String>, DbError>;
 
     /// Returns `(created_at, updated_at)` timestamps for a session.
     async fn load_session_timestamps(
@@ -492,17 +531,6 @@ pub trait SessionRepository: Send + Sync {
         id: &str,
         status: &str,
         timestamp_seconds: i64,
-    ) -> Result<(), DbError>;
-
-    /// Updates the persisted session summary text for a session row.
-    async fn update_session_summary(&self, id: &str, summary: &str) -> Result<(), DbError>;
-
-    /// Updates or clears the persisted focused-review cache for a session.
-    async fn update_session_focused_review(
-        &self,
-        id: &str,
-        diff_hash: Option<String>,
-        text: Option<String>,
     ) -> Result<(), DbError>;
 
     /// Updates the display title for a session row.
@@ -743,7 +771,6 @@ INSERT INTO session (
     status,
     project_id,
     prompt,
-    summary,
     title,
     reasoning_level,
     added_lines,
@@ -758,8 +785,6 @@ INSERT INTO session (
     questions,
     published_upstream_ref,
     merged_commit_hash,
-    focused_review_text,
-    focused_review_diff_hash,
     stack_base_commit_hash,
     in_progress_total_seconds,
     in_progress_started_at,
@@ -773,7 +798,6 @@ SELECT ?,
        ?,
        project_id,
        prompt,
-       summary,
        title,
        reasoning_level,
        added_lines,
@@ -782,8 +806,6 @@ SELECT ?,
        0,
        0,
        0,
-       NULL,
-       NULL,
        NULL,
        NULL,
        NULL,
@@ -801,12 +823,17 @@ WHERE id = ?
 
 /// SQL statement that copies durable transcript messages for one fork.
 const FORK_SESSION_MESSAGES_SQL: &str = r"
-INSERT INTO session_message (session_id, position, kind, content, created_at)
+INSERT INTO session_message (
+    session_id, position, kind, content, created_at, turn_id, entry_key, state
+)
 SELECT ?,
        position,
        kind,
        content,
-       created_at
+       created_at,
+       turn_id,
+       entry_key,
+       state
 FROM session_message
 WHERE session_id = ?
 ORDER BY position, id
@@ -846,8 +873,19 @@ WHERE id = ?
 
         sqlx::query(
             r"
-INSERT INTO session_message (session_id, position, kind, content, created_at)
-SELECT ?, COALESCE(MAX(position), -1) + 1, ?, ?, CAST(strftime('%s', 'now') AS INTEGER)
+INSERT INTO session_message (
+    session_id, position, kind, content, created_at, turn_id, state
+)
+SELECT ?,
+       COALESCE(MAX(position), -1) + 1,
+       ?,
+       ?,
+       CAST(strftime('%s', 'now') AS INTEGER),
+       CASE WHEN ? = 'user_prompt'
+            THEN COALESCE(MAX(turn_id), 0) + 1
+            ELSE COALESCE(MAX(turn_id), 0)
+       END,
+       'resolved'
 FROM session_message
 WHERE session_id = ?
 ",
@@ -855,11 +893,91 @@ WHERE session_id = ?
         .bind(id)
         .bind(kind.as_str())
         .bind(content)
+        .bind(kind.as_str())
         .bind(id)
         .execute(&mut *transaction)
         .await?;
 
         transaction.commit().await?;
+
+        Ok(())
+    }
+
+    async fn upsert_session_timeline_message(
+        &self,
+        id: &str,
+        message: SessionTimelineMessage<'_>,
+    ) -> Result<SessionMessageRow, DbError> {
+        let content = stored_message_content(message.kind, message.content);
+        let mut transaction = self.0.begin().await?;
+
+        let update_result = sqlx::query(
+            r"
+UPDATE session
+SET updated_at = CAST(strftime('%s', 'now') AS INTEGER)
+WHERE id = ?
+",
+        )
+        .bind(id)
+        .execute(&mut *transaction)
+        .await?;
+        if update_result.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound.into());
+        }
+
+        let row = sqlx::query_as::<_, SessionMessageRow>(
+            r"
+INSERT INTO session_message (
+    session_id, position, kind, content, created_at, turn_id, entry_key, state
+)
+SELECT ?,
+       COALESCE(MAX(position), -1) + 1,
+       ?,
+       ?,
+       CAST(strftime('%s', 'now') AS INTEGER),
+       ?,
+       ?,
+       ?
+FROM session_message
+WHERE session_id = ?
+ON CONFLICT(session_id, entry_key) DO UPDATE SET
+    kind = excluded.kind,
+    content = excluded.content,
+    turn_id = excluded.turn_id,
+    state = excluded.state
+RETURNING content, entry_key, kind, position, state, turn_id
+",
+        )
+        .bind(id)
+        .bind(message.kind.as_str())
+        .bind(content)
+        .bind(message.turn_id)
+        .bind(message.entry_key)
+        .bind(message.state.as_str())
+        .bind(id)
+        .fetch_one(&mut *transaction)
+        .await?;
+
+        transaction.commit().await?;
+
+        Ok(row)
+    }
+
+    async fn delete_session_timeline_message(
+        &self,
+        id: &str,
+        entry_key: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query(
+            r"
+DELETE FROM session_message
+WHERE session_id = ? AND entry_key = ?
+",
+        )
+        .bind(id)
+        .bind(entry_key)
+        .execute(&self.0)
+        .await?;
 
         Ok(())
     }
@@ -1181,7 +1299,6 @@ SELECT session.base_branch AS base_branch,
        session_review_request.web_url AS review_request_web_url,
        session.size AS size,
        session.status AS status,
-       session.summary,
        session.title,
        session.updated_at AS updated_at
 FROM session
@@ -1258,8 +1375,7 @@ ORDER BY session.updated_at DESC, session.created_at DESC, session.id
         let row = sqlx::query_as::<_, SessionDetailRow>(
             r"
 SELECT prompt,
-       questions,
-       summary
+       questions
 FROM session
 WHERE id = ?
 ",
@@ -1278,8 +1394,11 @@ WHERE id = ?
         let rows = sqlx::query_as::<_, SessionMessageRow>(
             r"
 SELECT content,
+       entry_key,
        kind,
-       position
+       position,
+       state,
+       turn_id
 FROM session_message
 WHERE session_id = ?
 ORDER BY position, id
@@ -1321,15 +1440,25 @@ ORDER BY session_id, position, id
     ) -> Result<Vec<SessionFocusedReviewRow>, DbError> {
         let rows = sqlx::query_as::<_, SessionFocusedReviewRow>(
             r"
-SELECT id AS session_id,
-       focused_review_diff_hash AS diff_hash,
-       focused_review_text AS text
+SELECT session.id AS session_id,
+       REPLACE(message.entry_key, 'focused_review:', '') AS diff_hash,
+       message.content AS text
 FROM session
-WHERE project_id = ?
-  AND focused_review_diff_hash IS NOT NULL
-  AND focused_review_text IS NOT NULL
-  AND focused_review_text <> ''
-ORDER BY updated_at DESC, id
+JOIN session_message AS message ON message.session_id = session.id
+WHERE session.project_id = ?
+  AND message.kind = 'focused_review'
+  AND message.state = 'resolved'
+  AND message.entry_key LIKE 'focused_review:%'
+  AND message.id = (
+      SELECT latest_message.id
+      FROM session_message AS latest_message
+      WHERE latest_message.session_id = session.id
+        AND latest_message.kind = 'focused_review'
+        AND latest_message.state = 'resolved'
+      ORDER BY latest_message.turn_id DESC, latest_message.position DESC, latest_message.id DESC
+      LIMIT 1
+  )
+ORDER BY session.updated_at DESC, session.id
 ",
         )
         .bind(project_id)
@@ -1493,19 +1622,28 @@ WHERE parent_session_id = ?
         Ok(materialized_child_ids)
     }
 
-    async fn load_session_summary(&self, session_id: &str) -> Result<Option<String>, DbError> {
-        let row = sqlx::query_scalar::<_, Option<String>>(
+    async fn load_latest_session_message(
+        &self,
+        session_id: &str,
+        kind: SessionMessageKind,
+    ) -> Result<Option<String>, DbError> {
+        let row = sqlx::query_scalar::<_, String>(
             r"
-SELECT summary
-FROM session
-WHERE id = ?
+SELECT content
+FROM session_message
+WHERE session_id = ?
+  AND kind = ?
+  AND state = 'resolved'
+ORDER BY turn_id DESC, position DESC, id DESC
+LIMIT 1
 ",
         )
         .bind(session_id)
+        .bind(kind.as_str())
         .fetch_optional(&self.0)
         .await?;
 
-        Ok(row.flatten())
+        Ok(row)
     }
 
     async fn load_session_timestamps(
@@ -1538,14 +1676,12 @@ WHERE id = ?
             r"
 UPDATE session
 SET questions = ?,
-    summary = ?,
     provider_conversation_id = ?,
     app_server_instruction_provider_conversation_id = ?
 WHERE id = ?
 ",
         )
         .bind(turn_metadata.questions_json.as_str())
-        .bind(turn_metadata.summary.as_str())
         .bind(turn_metadata.provider_conversation_id.as_deref())
         .bind(turn_metadata.instruction_conversation_id.as_deref())
         .bind(session_id)
@@ -1553,6 +1689,49 @@ WHERE id = ?
         .await?;
         if session_update.rows_affected() != 1 {
             return Err(sqlx::Error::RowNotFound.into());
+        }
+
+        let summary_entry_key = format!("turn_summary:{}", turn_metadata.turn_id);
+        if turn_metadata.summary.trim().is_empty() {
+            sqlx::query(
+                r"
+DELETE FROM session_message
+WHERE session_id = ? AND entry_key = ?
+",
+            )
+            .bind(session_id)
+            .bind(&summary_entry_key)
+            .execute(&mut *transaction)
+            .await?;
+        } else {
+            sqlx::query(
+                r"
+INSERT INTO session_message (
+    session_id, position, kind, content, created_at, turn_id, entry_key, state
+)
+SELECT ?,
+       COALESCE(MAX(position), -1) + 1,
+       'turn_summary',
+       ?,
+       CAST(strftime('%s', 'now') AS INTEGER),
+       ?,
+       ?,
+       'resolved'
+FROM session_message
+WHERE session_id = ?
+ON CONFLICT(session_id, entry_key) DO UPDATE SET
+    content = excluded.content,
+    turn_id = excluded.turn_id,
+    state = excluded.state
+",
+            )
+            .bind(session_id)
+            .bind(turn_metadata.summary.as_str())
+            .bind(turn_metadata.turn_id)
+            .bind(&summary_entry_key)
+            .bind(session_id)
+            .execute(&mut *transaction)
+            .await?;
         }
 
         if turn_metadata.token_usage_delta.input_tokens != 0
@@ -1970,45 +2149,6 @@ WHERE id = ?
         Ok(())
     }
 
-    async fn update_session_summary(&self, id: &str, summary: &str) -> Result<(), DbError> {
-        sqlx::query(
-            r"
-UPDATE session
-SET summary = ?
-WHERE id = ?
-",
-        )
-        .bind(summary)
-        .bind(id)
-        .execute(&self.0)
-        .await?;
-
-        Ok(())
-    }
-
-    async fn update_session_focused_review(
-        &self,
-        id: &str,
-        diff_hash: Option<String>,
-        text: Option<String>,
-    ) -> Result<(), DbError> {
-        sqlx::query(
-            r"
-UPDATE session
-SET focused_review_diff_hash = ?,
-    focused_review_text = ?
-WHERE id = ?
-",
-        )
-        .bind(diff_hash.as_deref())
-        .bind(text.as_deref())
-        .bind(id)
-        .execute(&self.0)
-        .await?;
-
-        Ok(())
-    }
-
     async fn update_session_title(&self, id: &str, title: &str) -> Result<(), DbError> {
         sqlx::query!(
             r#"
@@ -2226,8 +2366,6 @@ mod tests {
     #[derive(sqlx::FromRow)]
     struct ForkResetRow {
         app_server_instruction_provider_conversation_id: Option<String>,
-        focused_review_diff_hash: Option<String>,
-        focused_review_text: Option<String>,
         in_progress_started_at: Option<i64>,
         in_progress_total_seconds: i64,
         is_draft: bool,
@@ -2246,7 +2384,6 @@ mod tests {
             self,
             prompt: String,
             questions: Option<String>,
-            summary: Option<String>,
             review_request: Option<SessionReviewRequestRow>,
         ) -> SessionRow {
             SessionRow {
@@ -2271,7 +2408,6 @@ mod tests {
                 review_request,
                 size: self.size,
                 status: self.status,
-                summary,
                 title: self.title,
                 updated_at: self.updated_at,
             }
@@ -2295,7 +2431,6 @@ mod tests {
         review_request_target_branch: Option<String>,
         review_request_title: Option<String>,
         review_request_web_url: Option<String>,
-        summary: Option<String>,
     }
 
     impl SessionJoinRow {
@@ -2315,7 +2450,6 @@ mod tests {
                 review_request_target_branch,
                 review_request_title,
                 review_request_web_url,
-                summary,
             } = self;
 
             let review_request = SessionReviewRequestJoinRow {
@@ -2331,7 +2465,7 @@ mod tests {
             }
             .into_review_request_row();
 
-            metadata.into_session_row(prompt, questions, summary, review_request)
+            metadata.into_session_row(prompt, questions, review_request)
         }
 
         /// Builds a deterministic joined-session row fixture for conversion
@@ -2373,7 +2507,6 @@ mod tests {
                 review_request_web_url: Some(
                     "https://github.com/agentty-xyz/agentty/pull/42".to_string(),
                 ),
-                summary: Some("Summary text".to_string()),
             }
         }
     }
@@ -2417,8 +2550,6 @@ mod tests {
         sqlx::query_as::<_, ForkResetRow>(
             r"
 SELECT app_server_instruction_provider_conversation_id,
-       focused_review_diff_hash,
-       focused_review_text,
        in_progress_started_at,
        in_progress_total_seconds,
        is_draft,
@@ -2518,10 +2649,15 @@ WHERE id = ?
             .expect("failed to update merged commit hash");
         database
             .sessions()
-            .update_session_focused_review(
+            .upsert_session_timeline_message(
                 "source-session",
-                Some("diff123".to_string()),
-                Some("Focused review text".to_string()),
+                SessionTimelineMessage {
+                    content: "Focused review text",
+                    entry_key: "focused_review:diff123",
+                    kind: SessionMessageKind::FocusedReview,
+                    state: SessionMessageState::Resolved,
+                    turn_id: 1,
+                },
             )
             .await
             .expect("failed to update focused review");
@@ -2608,14 +2744,6 @@ WHERE id = ?
             Some("merged123")
         );
         assert_eq!(
-            source_reset_row.focused_review_diff_hash.as_deref(),
-            Some("diff123")
-        );
-        assert_eq!(
-            source_reset_row.focused_review_text.as_deref(),
-            Some("Focused review text")
-        );
-        assert_eq!(
             source_reset_row.stack_base_commit_hash.as_deref(),
             Some("stackbase123")
         );
@@ -2648,8 +2776,6 @@ WHERE id = ?
             None
         );
         assert_eq!(fork_reset_row.merged_commit_hash, None);
-        assert_eq!(fork_reset_row.focused_review_diff_hash, None);
-        assert_eq!(fork_reset_row.focused_review_text, None);
         assert_eq!(fork_reset_row.questions, None);
         assert_eq!(fork_reset_row.stack_base_commit_hash, None);
         assert_eq!(fork_reset_row.in_progress_started_at, None);
@@ -2741,9 +2867,18 @@ WHERE id IN ('a-older', 'z-newer')
             .load_session_review_request("fork-session")
             .await
             .expect("failed to load fork review request");
+        let fork_messages = database
+            .sessions()
+            .load_session_messages("fork-session")
+            .await
+            .expect("failed to load fork timeline");
 
         assert_source_reset_state(&source_reset_row, source_review_request.as_ref());
         assert_fork_reset_state(&fork_row, &fork_reset_row, fork_review_request.as_ref());
+        assert!(fork_messages.iter().any(|message| {
+            message.kind == SessionMessageKind::FocusedReview.as_str()
+                && message.content == "Focused review text"
+        }));
     }
 
     #[tokio::test]
@@ -2829,7 +2964,6 @@ WHERE id IN ('a-older', 'z-newer')
             Some("origin/session-a")
         );
         assert_eq!(session_row.questions.as_deref(), Some("Question text"));
-        assert_eq!(session_row.summary.as_deref(), Some("Summary text"));
         assert_eq!(session_row.title.as_deref(), Some("Review session"));
         assert_eq!(
             session_row.review_request,

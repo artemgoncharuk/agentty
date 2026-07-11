@@ -12,8 +12,8 @@ use super::task;
 use crate::app::session_state::SessionState;
 use crate::domain::agent::{AgentModel, AgentSelection};
 use crate::domain::session::{SessionId, Status};
-use crate::domain::session_message::SessionTranscript;
-use crate::infra::db::SessionFocusedReviewRow;
+use crate::domain::session_message::{SessionMessageKind, SessionMessageState, SessionTranscript};
+use crate::infra::db::{AppRepositories, SessionFocusedReviewRow};
 
 /// Cached focused review state for a session.
 #[derive(Debug)]
@@ -84,13 +84,29 @@ pub(crate) struct ReviewUpdate {
 /// Persistable focused-review cache change produced by the reducer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FocusedReviewPersistence {
-    /// Hash of the diff that the persisted text applies to, or `None` when
-    /// clearing a stale persisted review.
-    pub(crate) diff_hash: Option<u64>,
+    /// Hash of the diff that the persisted timeline entry applies to.
+    pub(crate) diff_hash: u64,
     /// Stable session identifier for the focused-review cache row.
     pub(crate) session_id: SessionId,
-    /// Focused-review markdown to persist, or `None` when clearing it.
-    pub(crate) text: Option<String>,
+    /// Lifecycle state persisted for the focused-review timeline entry.
+    pub(crate) state: SessionMessageState,
+    /// Focused-review markdown or user-visible failure text.
+    pub(crate) text: String,
+}
+
+/// Owned services shared while automatic focused review starts for a reducer
+/// batch.
+pub(crate) struct AutoReviewContext {
+    /// Reducer event sender used for pending and completed review updates.
+    pub(crate) app_event_tx: mpsc::UnboundedSender<AppEvent>,
+    /// Repository bundle used to persist pending review timeline entries.
+    pub(crate) db: AppRepositories,
+    /// Git boundary used to load each session diff.
+    pub(crate) git_client: Arc<dyn GitClient>,
+    /// Agent and model used for focused review generation.
+    pub(crate) review_selection: AgentSelection,
+    /// Per-session observable update versions shared with the reducer.
+    pub(crate) session_update_versions: crate::app::service::SessionUpdateVersionMap,
 }
 
 /// Prefix for the focused-review loading status while assist output is being
@@ -245,9 +261,7 @@ pub(crate) async fn auto_start_reviews(
     review_cache: &mut HashMap<SessionId, ReviewCacheEntry>,
     session_ids: &HashSet<SessionId>,
     session_state: &mut SessionState,
-    git_client: Arc<dyn GitClient>,
-    app_event_tx: mpsc::UnboundedSender<AppEvent>,
-    review_selection: AgentSelection,
+    context: AutoReviewContext,
 ) {
     for session_id in session_ids {
         let Some(session) = session_state
@@ -283,7 +297,8 @@ pub(crate) async fn auto_start_reviews(
             .and_then(SessionTranscript::conversation_replay_text);
         let session_folder = session.folder.clone();
 
-        let diff = git_client
+        let diff = context
+            .git_client
             .diff(session_folder.clone(), base_branch)
             .await
             .unwrap_or_default();
@@ -307,10 +322,32 @@ pub(crate) async fn auto_start_reviews(
                 diff_hash: new_hash,
             },
         );
+        if let Some(handles) = session_state.handles().get(session_id) {
+            let entry_key = format!("focused_review:{new_hash}");
+            let turn_id = handles
+                .transcript
+                .lock()
+                .map_or(0, |transcript| transcript.current_turn_id());
+            let _ = super::session::SessionTaskService::upsert_timeline_message(
+                &handles.transcript,
+                &context.db,
+                &context.app_event_tx,
+                &context.session_update_versions,
+                session_id,
+                super::session::SessionTimelineMessageUpdate {
+                    content: &review_loading_message(context.review_selection.model()),
+                    entry_key: &entry_key,
+                    kind: SessionMessageKind::FocusedReview,
+                    state: SessionMessageState::Pending,
+                    turn_id,
+                },
+            )
+            .await;
+        }
         mark_session_agent_review(session_state, session_id);
         start_review_assist(
-            app_event_tx.clone(),
-            review_selection,
+            context.app_event_tx.clone(),
+            context.review_selection,
             session_id,
             &session_folder,
             new_hash,
@@ -337,9 +374,17 @@ fn apply_review_update(
     }
 
     let persistence_update = FocusedReviewPersistence {
-        diff_hash: result.as_ref().ok().map(|_| diff_hash),
+        diff_hash,
         session_id: SessionId::from(session_id),
-        text: result.as_ref().ok().cloned(),
+        state: if result.is_ok() {
+            SessionMessageState::Resolved
+        } else {
+            SessionMessageState::Failed
+        },
+        text: result.as_ref().map_or_else(
+            |error| format!("Review assist unavailable: {}", error.trim()),
+            Clone::clone,
+        ),
     };
     review_cache.insert(
         SessionId::from(session_id),
@@ -533,9 +578,10 @@ mod tests {
         assert_eq!(
             persistence_updates,
             vec![FocusedReviewPersistence {
-                diff_hash: Some(diff_hash),
+                diff_hash,
                 session_id,
-                text: Some(review_text.to_string()),
+                state: SessionMessageState::Resolved,
+                text: review_text.to_string(),
             }]
         );
     }
@@ -563,9 +609,10 @@ mod tests {
         assert_eq!(
             persistence_updates,
             vec![FocusedReviewPersistence {
-                diff_hash: None,
+                diff_hash,
                 session_id,
-                text: None,
+                state: SessionMessageState::Failed,
+                text: "Review assist unavailable: provider failed".to_string(),
             }]
         );
     }

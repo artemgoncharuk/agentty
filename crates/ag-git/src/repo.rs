@@ -61,6 +61,36 @@ pub(super) fn main_repo_root_sync(repo_path: &Path) -> Result<PathBuf, GitError>
     repo_root_from_git_dir(repo_path, &git_common_dir)
 }
 
+/// Returns whether `repo_path` resolves to a bare repository.
+///
+/// A bare repository has no working tree, so working-tree operations such as
+/// `git status` cannot run there. This distinguishes bare-repo layouts (where
+/// [`main_repo_root`] resolves to the bare repository root rather than a
+/// checked-out main worktree) from ordinary clones.
+///
+/// # Arguments
+/// * `repo_path` - Path to a git repository or worktree
+///
+/// # Returns
+/// Ok(true) when `repo_path` is bare, Ok(false) otherwise.
+///
+/// # Errors
+/// Returns an error if git metadata cannot be queried from `repo_path`.
+pub(crate) async fn is_bare_repository(repo_path: PathBuf) -> Result<bool, GitError> {
+    spawn_blocking(move || is_bare_repository_sync(&repo_path)).await?
+}
+
+/// Resolves whether `repo_path` is a bare repository in synchronous code.
+pub(super) fn is_bare_repository_sync(repo_path: &Path) -> Result<bool, GitError> {
+    let output = run_git_command_sync(
+        repo_path,
+        &["rev-parse", "--is-bare-repository"],
+        "Git rev-parse --is-bare-repository failed",
+    )?;
+
+    Ok(output.trim() == "true")
+}
+
 /// Resolves the git directory path for a repository root or worktree root.
 pub(super) fn resolve_git_dir(repo_dir: &Path) -> Option<PathBuf> {
     let dot_git = repo_dir.join(".git");

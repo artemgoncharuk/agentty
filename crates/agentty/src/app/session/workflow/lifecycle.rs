@@ -3586,6 +3586,10 @@ mod tests {
             .expect_main_repo_root()
             .once()
             .returning(|_| Box::pin(async { Ok(PathBuf::from("/tmp/project")) }));
+        mock_git_client
+            .expect_is_bare_repository()
+            .once()
+            .returning(|_| Box::pin(async { Ok(false) }));
         mock_git_client.expect_create_worktree().times(0);
         mock_git_client.expect_find_git_repo_root().times(0);
         let services = test_services_with_fs_client(

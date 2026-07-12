@@ -168,6 +168,9 @@ fn allow_detect_git_info_with_head_hash(mock: &mut git::MockGitClient, allow_hea
 
         Box::pin(async move { Ok(repo_root) })
     });
+    mock.expect_is_bare_repository()
+        .times(0..)
+        .returning(|_| Box::pin(async { Ok(false) }));
     mock.expect_worktree_status()
         .times(0..)
         .returning(|_| Box::pin(async { Ok(String::new()) }));
@@ -352,6 +355,9 @@ fn setup_mock_worktree_expectations(mock: &mut git::MockGitClient, repo_root: Pa
         let repo_root = repo_root.clone();
         Box::pin(async move { Ok(repo_root) })
     });
+    mock.expect_is_bare_repository()
+        .times(0..)
+        .returning(|_| Box::pin(async { Ok(false) }));
 }
 
 /// Configures merge, rebase, and conflict resolution expectations.

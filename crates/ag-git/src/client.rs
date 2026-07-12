@@ -15,11 +15,12 @@ use super::{
     create_worktree, current_upstream_reference, delete_branch, detect_git_info, diff,
     fetch_remote, find_git_repo_root, get_ahead_behind, get_ref_ahead_behind, has_commits_since,
     has_unmerged_paths, head_commit_message, head_hash, head_short_hash, in_progress_operation,
-    is_rebase_in_progress, is_worktree_clean, list_conflicted_files, list_local_commit_titles,
-    list_staged_conflict_marker_files, list_upstream_commit_titles, main_repo_root, pull_rebase,
-    push_current_branch, push_current_branch_to_remote_branch, rebase, rebase_continue,
-    rebase_onto_start, rebase_start, ref_hash, remote_branch_exists, remove_worktree, repo_url,
-    squash_merge, squash_merge_diff, stage_all, tracked_worktree_status, worktree_status,
+    is_bare_repository, is_rebase_in_progress, is_worktree_clean, list_conflicted_files,
+    list_local_commit_titles, list_staged_conflict_marker_files, list_upstream_commit_titles,
+    main_repo_root, pull_rebase, push_current_branch, push_current_branch_to_remote_branch, rebase,
+    rebase_continue, rebase_onto_start, rebase_start, ref_hash, remote_branch_exists,
+    remove_worktree, repo_url, squash_merge, squash_merge_diff, stage_all, tracked_worktree_status,
+    worktree_status,
 };
 
 /// Boxed async result used by [`GitClient`] trait methods.
@@ -397,6 +398,12 @@ pub trait GitClient: Send + Sync {
     /// # Errors
     /// Returns an error when the main repository cannot be resolved.
     fn main_repo_root(&self, repo_path: PathBuf) -> GitFuture<Result<PathBuf, GitError>>;
+
+    /// Resolves whether a repository or worktree path is bare (no working tree).
+    ///
+    /// # Errors
+    /// Returns an error when git metadata cannot be queried from `repo_path`.
+    fn is_bare_repository(&self, repo_path: PathBuf) -> GitFuture<Result<bool, GitError>>;
 }
 
 /// Production [`GitClient`] implementation backed by real git commands.
@@ -672,6 +679,10 @@ impl GitClient for RealGitClient {
 
     fn main_repo_root(&self, repo_path: PathBuf) -> GitFuture<Result<PathBuf, GitError>> {
         Box::pin(async move { main_repo_root(repo_path).await })
+    }
+
+    fn is_bare_repository(&self, repo_path: PathBuf) -> GitFuture<Result<bool, GitError>> {
+        Box::pin(async move { is_bare_repository(repo_path).await })
     }
 }
 
@@ -1099,6 +1110,36 @@ mod tests {
             canonicalize_test_path(&repo_root),
             canonicalize_test_path(dir.path())
         );
+    }
+
+    #[tokio::test]
+    async fn test_is_bare_repository_false_for_working_tree() {
+        // Arrange
+        let dir = tempdir().expect("failed to create temp dir");
+        setup_test_git_repo(dir.path());
+
+        // Act
+        let is_bare = is_bare_repository(dir.path().to_path_buf())
+            .await
+            .expect("failed to resolve bare status");
+
+        // Assert
+        assert!(!is_bare);
+    }
+
+    #[tokio::test]
+    async fn test_is_bare_repository_true_for_bare_repo() {
+        // Arrange
+        let dir = tempdir().expect("failed to create temp dir");
+        run_git_command(dir.path(), &["init", "--bare", "-b", "main"]);
+
+        // Act
+        let is_bare = is_bare_repository(dir.path().to_path_buf())
+            .await
+            .expect("failed to resolve bare status");
+
+        // Assert
+        assert!(is_bare);
     }
 
     #[tokio::test]

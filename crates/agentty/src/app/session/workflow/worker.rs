@@ -1110,6 +1110,10 @@ mod tests {
 
                 Box::pin(async move { Ok(main_repo_root) })
             });
+        mock_git_client
+            .expect_is_bare_repository()
+            .once()
+            .returning(|_| Box::pin(async { Ok(false) }));
 
         mock_git_client
     }
@@ -1163,6 +1167,10 @@ mod tests {
 
                 Box::pin(async move { Ok(main_repo_root) })
             });
+        mock_git_client
+            .expect_is_bare_repository()
+            .once()
+            .returning(|_| Box::pin(async { Ok(false) }));
         mock_git_client
             .expect_tracked_worktree_status()
             .once()
@@ -3530,6 +3538,11 @@ mod tests {
                 Box::pin(async move { Ok(main_checkout_root) })
             });
         mock_git_client
+            .expect_is_bare_repository()
+            .times(1)
+            .in_sequence(&mut sequence)
+            .returning(|_| Box::pin(async { Ok(false) }));
+        mock_git_client
             .expect_is_worktree_clean()
             .times(1)
             .in_sequence(&mut sequence)
@@ -4076,6 +4089,10 @@ mod tests {
                 Box::pin(async move { Ok(main_repo_root) })
             });
         mock_git_client
+            .expect_is_bare_repository()
+            .times(0..)
+            .returning(|_| Box::pin(async { Ok(false) }));
+        mock_git_client
             .expect_tracked_worktree_status()
             .times(0..)
             .returning(|_| Box::pin(async { Ok(String::new()) }));
@@ -4262,6 +4279,10 @@ mod tests {
                 Box::pin(async move { Ok(main_repo_root) })
             }
         });
+        mock_git_client
+            .expect_is_bare_repository()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(false) }));
         mock_git_client
             .expect_tracked_worktree_status()
             .times(2)

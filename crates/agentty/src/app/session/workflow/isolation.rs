@@ -13,6 +13,13 @@ use crate::infra::fs::FsClient;
 pub(super) struct SessionWorktreeValidation {
     /// Canonical main repository checkout that must remain unchanged.
     pub(super) main_repo_root: PathBuf,
+    /// `true` when `main_repo_root` is a bare repository with no working tree.
+    ///
+    /// Bare-repo layouts keep every checkout in a linked worktree, so there is
+    /// no main checkout to inspect. Callers must skip main-checkout working-tree
+    /// probes (for example `git status`) in that case, which would otherwise
+    /// fail with `fatal: this operation must be run in a work tree`.
+    pub(super) main_checkout_is_bare: bool,
 }
 
 /// Verifies that `folder` is an isolated linked worktree for `session_id`.
@@ -70,7 +77,15 @@ pub(super) async fn validate_session_worktree(
         )));
     }
 
-    Ok(SessionWorktreeValidation { main_repo_root })
+    let main_checkout_is_bare = git_client
+        .is_bare_repository(main_repo_root.clone())
+        .await
+        .map_err(|error| main_repo_root_error(&error))?;
+
+    Ok(SessionWorktreeValidation {
+        main_repo_root,
+        main_checkout_is_bare,
+    })
 }
 
 /// Verifies git resolved an existing main checkout before canonicalization.
@@ -167,6 +182,10 @@ mod tests {
             .expect_main_repo_root()
             .once()
             .returning(|_| Box::pin(async { Ok(PathBuf::from("/tmp/project")) }));
+        git_client
+            .expect_is_bare_repository()
+            .once()
+            .returning(|_| Box::pin(async { Ok(false) }));
 
         // Act
         let validation =
@@ -176,6 +195,38 @@ mod tests {
 
         // Assert
         assert_eq!(validation.main_repo_root, repo_root);
+        assert!(!validation.main_checkout_is_bare);
+    }
+
+    #[tokio::test]
+    async fn validate_session_worktree_flags_bare_main_repo() {
+        // Arrange
+        let session_folder = PathBuf::from("/tmp/session");
+        let repo_root = PathBuf::from("/tmp/project");
+        let fs_client = fs_client_for_validation(session_folder.clone(), repo_root.clone());
+        let mut git_client = git::MockGitClient::new();
+        git_client
+            .expect_detect_git_info()
+            .once()
+            .returning(|_| Box::pin(async { Some("wt/session".to_string()) }));
+        git_client
+            .expect_main_repo_root()
+            .once()
+            .returning(|_| Box::pin(async { Ok(PathBuf::from("/tmp/project")) }));
+        git_client
+            .expect_is_bare_repository()
+            .once()
+            .returning(|_| Box::pin(async { Ok(true) }));
+
+        // Act
+        let validation =
+            validate_session_worktree(&fs_client, &git_client, session_folder.as_path(), "session")
+                .await
+                .expect("linked worktree of a bare repo should validate");
+
+        // Assert
+        assert_eq!(validation.main_repo_root, repo_root);
+        assert!(validation.main_checkout_is_bare);
     }
 
     #[tokio::test]

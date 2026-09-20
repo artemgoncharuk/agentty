@@ -8,9 +8,11 @@ use crate::presentation::app_mode::{
 };
 use crate::presentation::prompt::{PromptAttachmentState, PromptHistoryState, PromptSlashState};
 use crate::presentation::viewport::{
-    LayoutSnapshot, ScrollRegion, ScrollRegionKind, ScrollbarDrag,
+    LayoutSnapshot, ListItemHit, ListRegion, ListRegionKind, ScrollRegion, ScrollRegionKind,
+    ScrollbarDrag,
 };
 use crate::runtime::PresentationState;
+use crate::runtime::click_handler::MouseOutcome;
 
 fn chat_region() -> ScrollRegion {
     ScrollRegion {
@@ -85,7 +87,7 @@ async fn test_wheel_up_over_chat_pins_view_above_tail() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::View {
@@ -110,7 +112,7 @@ async fn test_wheel_down_over_chat_returns_to_follow_tail_at_bottom() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::View {
@@ -135,7 +137,7 @@ async fn test_wheel_outside_chat_region_is_ignored() {
     );
 
     // Assert
-    assert!(!changed);
+    assert_eq!(changed, MouseOutcome::Ignored);
     assert!(matches!(
         app.mode,
         AppMode::View {
@@ -163,7 +165,7 @@ async fn test_wheel_in_prompt_mode_scrolls_transcript_and_keeps_composer() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         &app.mode,
         AppMode::Prompt {
@@ -202,7 +204,7 @@ async fn test_wheel_in_question_mode_keeps_answer_focus() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::Question {
@@ -239,8 +241,8 @@ async fn test_press_on_chat_thumb_starts_drag_and_drag_follows_pointer() {
     );
 
     // Assert
-    assert!(!press_changed);
-    assert!(drag_changed);
+    assert_eq!(press_changed, MouseOutcome::Ignored);
+    assert_eq!(drag_changed, MouseOutcome::Redraw);
     assert_eq!(
         drag_state,
         Some(ScrollbarDrag {
@@ -278,7 +280,7 @@ async fn test_drag_to_track_bottom_returns_chat_to_follow_tail() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::View {
@@ -303,7 +305,7 @@ async fn test_press_on_track_outside_thumb_jumps_scroll_position() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::View {
@@ -328,7 +330,7 @@ async fn test_drag_without_press_is_ignored() {
     );
 
     // Assert
-    assert!(!changed);
+    assert_eq!(changed, MouseOutcome::Ignored);
     assert!(matches!(
         app.mode,
         AppMode::View {
@@ -379,7 +381,7 @@ async fn test_wheel_over_diff_panel_scrolls_and_clamps() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::Diff {
@@ -423,7 +425,7 @@ async fn test_wheel_over_help_overlay_clamps_to_content() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::Help {
@@ -449,8 +451,8 @@ async fn test_mouse_move_and_other_buttons_are_ignored() {
     );
 
     // Assert
-    assert!(!moved);
-    assert!(!right_pressed);
+    assert_eq!(moved, MouseOutcome::Ignored);
+    assert_eq!(right_pressed, MouseOutcome::Ignored);
     assert_eq!(presentation.mouse_drag(), None);
 }
 
@@ -514,7 +516,7 @@ async fn test_wheel_in_chat_mode_without_recorded_region_is_ignored() {
     );
 
     // Assert
-    assert!(!changed);
+    assert_eq!(changed, MouseOutcome::Ignored);
     assert!(matches!(
         app.mode,
         AppMode::View {
@@ -539,7 +541,7 @@ async fn test_wheel_in_list_mode_is_ignored() {
     );
 
     // Assert
-    assert!(!changed);
+    assert_eq!(changed, MouseOutcome::Ignored);
     assert!(matches!(app.mode, AppMode::List));
 }
 
@@ -582,8 +584,8 @@ async fn test_wheel_over_help_overlay_scrolls_up_and_ignores_pointer_outside() {
     );
 
     // Assert
-    assert!(!outside_changed);
-    assert!(inside_changed);
+    assert_eq!(outside_changed, MouseOutcome::Ignored);
+    assert_eq!(inside_changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::Help {
@@ -613,7 +615,7 @@ async fn test_wheel_over_help_mode_without_recorded_region_is_ignored() {
     );
 
     // Assert
-    assert!(!changed);
+    assert_eq!(changed, MouseOutcome::Ignored);
 }
 
 #[tokio::test]
@@ -637,7 +639,7 @@ async fn test_press_on_diff_thumb_starts_drag_and_drag_follows_pointer() {
     );
 
     // Assert
-    assert!(!press_changed);
+    assert_eq!(press_changed, MouseOutcome::Ignored);
     assert_eq!(
         drag_state,
         Some(ScrollbarDrag {
@@ -645,7 +647,7 @@ async fn test_press_on_diff_thumb_starts_drag_and_drag_follows_pointer() {
             region: ScrollRegionKind::DiffPanel,
         })
     );
-    assert!(drag_changed);
+    assert_eq!(drag_changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::Diff {
@@ -670,7 +672,7 @@ async fn test_press_on_diff_track_outside_thumb_jumps_scroll_position() {
     );
 
     // Assert
-    assert!(changed);
+    assert_eq!(changed, MouseOutcome::Redraw);
     assert!(matches!(
         app.mode,
         AppMode::Diff {
@@ -711,8 +713,8 @@ async fn test_diff_drag_is_ignored_without_region_or_diff_mode() {
     );
 
     // Assert
-    assert!(!without_region_changed);
-    assert!(!without_diff_mode_changed);
+    assert_eq!(without_region_changed, MouseOutcome::Ignored);
+    assert_eq!(without_diff_mode_changed, MouseOutcome::Ignored);
 }
 
 #[tokio::test]
@@ -746,8 +748,8 @@ async fn test_chat_drag_is_ignored_without_region_or_chat_mode() {
     );
 
     // Assert
-    assert!(!without_region_changed);
-    assert!(!without_chat_mode_changed);
+    assert_eq!(without_region_changed, MouseOutcome::Ignored);
+    assert_eq!(without_chat_mode_changed, MouseOutcome::Ignored);
 }
 
 #[tokio::test]
@@ -769,7 +771,7 @@ async fn test_press_outside_any_scrollbar_clears_drag_and_changes_nothing() {
     );
 
     // Assert
-    assert!(!changed);
+    assert_eq!(changed, MouseOutcome::Ignored);
     assert_eq!(presentation.mouse_drag(), None);
     assert!(matches!(
         app.mode,
@@ -778,4 +780,87 @@ async fn test_press_outside_any_scrollbar_clears_drag_and_changes_nothing() {
             ..
         }
     ));
+}
+
+/// Verifies a left press over a recorded list item selects it, and a press
+/// on a scrollbar keeps scrollbar semantics even when a list overlaps it.
+#[tokio::test]
+async fn test_press_routes_list_items_after_scrollbars() {
+    // Arrange
+    let mut app = crate::test_support::new_test_app_without_retained_base_dir().await;
+    app.mode = AppMode::List;
+    app.tabs.set(crate::app::Tab::Settings);
+    let presentation = PresentationState::default();
+    presentation.set_layout_snapshot(LayoutSnapshot {
+        lists: vec![ListRegion {
+            items: vec![ListItemHit {
+                area: ViewportRect {
+                    height: 1,
+                    width: 40,
+                    x: 0,
+                    y: 6,
+                },
+                index: 2,
+            }],
+            kind: ListRegionKind::Settings,
+        }],
+        ..LayoutSnapshot::default()
+    });
+
+    // Act
+    let selected = handle_mouse_event(
+        &mut app,
+        &presentation,
+        mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
+    );
+    let activated = handle_mouse_event(
+        &mut app,
+        &presentation,
+        mouse(MouseEventKind::Down(MouseButton::Left), 5, 6),
+    );
+    let missed = handle_mouse_event(
+        &mut app,
+        &presentation,
+        mouse(MouseEventKind::Down(MouseButton::Left), 5, 7),
+    );
+
+    // Assert
+    assert_eq!(selected, MouseOutcome::Redraw);
+    assert_eq!(app.settings_presentation.selected_list_index(), 2);
+    assert_eq!(activated, MouseOutcome::Activate);
+    assert_eq!(missed, MouseOutcome::Ignored);
+}
+
+/// Verifies a scrollbar press is not also treated as a list click.
+#[tokio::test]
+async fn test_press_on_scrollbar_does_not_fall_through_to_lists() {
+    // Arrange
+    let mut app = crate::test_support::new_test_app_without_retained_base_dir().await;
+    app.mode = view_mode(Some(0));
+    let presentation = presentation_with_chat_region();
+    let mut layout = presentation.layout_snapshot();
+    layout.lists.push(ListRegion {
+        items: vec![ListItemHit {
+            area: ViewportRect {
+                height: 20,
+                width: 80,
+                x: 0,
+                y: 0,
+            },
+            index: 0,
+        }],
+        kind: ListRegionKind::Sessions,
+    });
+    presentation.set_layout_snapshot(layout);
+
+    // Act
+    let pressed = handle_mouse_event(
+        &mut app,
+        &presentation,
+        mouse(MouseEventKind::Down(MouseButton::Left), 78, 4),
+    );
+
+    // Assert
+    assert_eq!(pressed, MouseOutcome::Ignored);
+    assert!(presentation.mouse_drag().is_some());
 }

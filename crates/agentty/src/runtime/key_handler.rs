@@ -220,7 +220,7 @@ async fn handle_session_creation_key(app: &mut App, key: KeyEvent) -> io::Result
 }
 
 /// Updates the highlighted option in the session creation selector.
-fn update_session_creation_selection(app: &mut App, selected_option_index: usize) {
+pub(super) fn update_session_creation_selection(app: &mut App, selected_option_index: usize) {
     let mut selected_option_index = selected_option_index.min(4);
     while selected_option_index > 0
         && !session_creation_option_is_enabled(app, selected_option_index)
@@ -256,7 +256,7 @@ fn select_next_session_creation_option(app: &mut App) {
 }
 
 /// Returns whether one creation-selector row can currently be chosen.
-fn session_creation_option_is_enabled(app: &App, option_index: usize) -> bool {
+pub(super) fn session_creation_option_is_enabled(app: &App, option_index: usize) -> bool {
     match option_index {
         0..=2 => true,
         3 => selected_stacked_parent_session_id(app).is_some(),
@@ -409,7 +409,7 @@ fn update_stack_append_parent_selection(app: &mut App, move_up: bool) {
 }
 
 /// Returns eligible parent identifiers in visible session order.
-fn stack_append_parent_session_ids(app: &App, session_id: &SessionId) -> Vec<SessionId> {
+pub(super) fn stack_append_parent_session_ids(app: &App, session_id: &SessionId) -> Vec<SessionId> {
     app.sessions
         .sessions()
         .iter()
@@ -526,7 +526,7 @@ async fn switch_to_selected_switcher_project(app: &mut App) {
 }
 
 /// Clamps and stores the highlighted row in the project switcher popup.
-fn update_project_switcher_selection(app: &mut App, selected_option_index: usize) {
+pub(super) fn update_project_switcher_selection(app: &mut App, selected_option_index: usize) {
     let max_option_index = app.projects.mru_project_items().len().saturating_sub(1);
 
     if let AppMode::ProjectSwitcher {

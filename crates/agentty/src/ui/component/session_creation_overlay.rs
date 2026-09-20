@@ -4,8 +4,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::style::palette;
-use crate::ui::{Component, overlay};
+use crate::ui::{Component, layout_snapshot, overlay};
 
 /// Minimum popup height that leaves room for title, options, and hints
 /// without adding unused vertical space.
@@ -28,6 +29,9 @@ const STACKED_SESSION_DETAIL: &str = "Stack on selected";
 /// Popup dimensions for the compact session selector.
 const OVERLAY_DIMENSIONS: overlay::OverlayDimensions =
     overlay::OverlayDimensions::new(30, 22, MIN_OVERLAY_WIDTH, MIN_OVERLAY_HEIGHT);
+
+/// Number of option rows the selector paints.
+const SESSION_CREATION_OPTION_COUNT: usize = 5;
 
 /// Centered popup used to choose the type of session to create.
 pub struct SessionCreationOverlay {
@@ -155,9 +159,16 @@ impl SessionCreationOverlay {
 impl Component for SessionCreationOverlay {
     fn render(&self, f: &mut Frame, area: Rect) {
         let popup_area = OVERLAY_DIMENSIONS.centered_popup_area(area);
+        let block = overlay::overlay_block("New Session", palette::accent());
+        layout_snapshot::record_list(layout_snapshot::consecutive_rows_list(
+            ListRegionKind::SessionCreation,
+            overlay::option_rows_area(&block, popup_area),
+            0,
+            SESSION_CREATION_OPTION_COUNT,
+        ));
         let paragraph = Paragraph::new(self.lines())
             .alignment(Alignment::Left)
-            .block(overlay::overlay_block("New Session", palette::accent()));
+            .block(block);
 
         overlay::clear_popup_area(f, popup_area);
         f.render_widget(paragraph, popup_area);

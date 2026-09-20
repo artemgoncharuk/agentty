@@ -79,11 +79,14 @@ through the correct modules without crossing layer boundaries.
 
 ## Add a Mouse Interaction
 
-1. Record the panel geometry during render with the
+1. Record the panel or list geometry during render with the
    `crates/agentty/src/ui/layout_snapshot.rs` helpers, extending `LayoutSnapshot` in
-   `crates/agentty/src/presentation/viewport.rs` when a new panel needs hit-testing.
+   `crates/agentty/src/presentation/viewport.rs` when a new panel needs hit-testing or
+   adding a `ListRegionKind` when a new list becomes clickable.
 1. Route the gesture in `crates/agentty/src/runtime/mouse_handler.rs`, reusing
-   `ScrollRegion` math for clamping and follow-tail behavior.
+   `ScrollRegion` math for clamping and follow-tail behavior; resolve list clicks in
+   `crates/agentty/src/runtime/click_handler.rs`, where clicking the selected item
+   returns `MouseOutcome::Activate` so the event loop replays it as `Enter`.
 1. Keep terminal capture changes in `crates/agentty/src/runtime/terminal.rs` behind
    `TerminalOperation` and `MouseCapture`.
 1. Update the Mouse section of `docs/site/content/docs/usage/keybindings.md`.

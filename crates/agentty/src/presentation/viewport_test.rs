@@ -1,4 +1,7 @@
-use super::{MOUSE_WHEEL_SCROLL_LINES, ScrollRegion, ScrollbarGeometry};
+use super::{
+    LayoutSnapshot, ListItemHit, ListRegion, ListRegionKind, MOUSE_WHEEL_SCROLL_LINES,
+    ScrollRegion, ScrollbarGeometry,
+};
 use crate::presentation::app_mode::ViewportRect;
 
 fn region(total_lines: u16, viewport_height: u16) -> ScrollRegion {
@@ -157,4 +160,63 @@ fn test_scroll_offset_for_pointer_row_without_scrollbar_stays_at_top() {
 
     // Assert
     assert_eq!(scroll_offset, 0);
+}
+
+fn list(kind: ListRegionKind, first_index: usize, x: u16, y: u16, count: usize) -> ListRegion {
+    ListRegion {
+        items: (0..count)
+            .map(|offset| ListItemHit {
+                area: ViewportRect {
+                    height: 1,
+                    width: 10,
+                    x,
+                    y: y + u16::try_from(offset).unwrap_or(u16::MAX),
+                },
+                index: first_index + offset,
+            })
+            .collect(),
+        kind,
+    }
+}
+
+#[test]
+fn test_list_region_item_at_returns_the_index_under_the_pointer() {
+    // Arrange
+    let region = list(ListRegionKind::Projects, 3, 2, 5, 3);
+
+    // Act, Assert
+    assert_eq!(region.item_at(2, 5), Some(3));
+    assert_eq!(region.item_at(11, 7), Some(5));
+    assert_eq!(region.item_at(12, 7), None, "right of the row");
+    assert_eq!(region.item_at(2, 8), None, "below the last row");
+    assert_eq!(region.item_at(1, 5), None, "left of the row");
+}
+
+#[test]
+fn test_layout_snapshot_list_item_at_prefers_the_last_painted_list() {
+    // Arrange
+    let snapshot = LayoutSnapshot {
+        lists: vec![
+            list(ListRegionKind::Sessions, 0, 0, 0, 6),
+            list(ListRegionKind::SessionCreation, 0, 0, 2, 2),
+        ],
+        ..LayoutSnapshot::default()
+    };
+
+    // Act, Assert
+    assert_eq!(
+        snapshot.list_item_at(0, 3),
+        Some((ListRegionKind::SessionCreation, 1))
+    );
+    assert_eq!(
+        snapshot.list_item_at(0, 5),
+        Some((ListRegionKind::Sessions, 5))
+    );
+    assert_eq!(snapshot.list_item_at(30, 5), None);
+}
+
+#[test]
+fn test_layout_snapshot_list_item_at_without_lists_is_none() {
+    // Act, Assert
+    assert_eq!(LayoutSnapshot::default().list_item_at(0, 0), None);
 }

@@ -6,8 +6,8 @@ use ratatui::widgets::TableState;
 use super::{
     EMPTY_SESSIONS_HINT, ROW_HIGHLIGHT_SYMBOL, SessionListPage, TABLE_COLUMN_SPACING, column_width,
     model_column_width, prepare_grouped_table_state, prepared_session_rows, reasoning_level_color,
-    selected_render_row, selected_session_id, session_list_help_line, size_color,
-    status_column_width, timer_column_width, tree_position_label,
+    selected_render_row, selected_session_id, session_list_help_line, session_list_rows,
+    size_color, status_column_width, timer_column_width, tree_position_label,
 };
 use crate::app::session_state::SessionGitStatus;
 use crate::domain::agent::{AgentModel, ReasoningLevel};
@@ -16,8 +16,9 @@ use crate::domain::session::{
 };
 use crate::domain::session_order::SessionTreePosition;
 use crate::domain::theme::ColorTheme;
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::render::Page;
-use crate::ui::style;
+use crate::ui::{layout_snapshot, style};
 
 /// Flattens a rendered test buffer into a plain string for assertions.
 fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
@@ -978,4 +979,78 @@ fn test_render_keeps_selected_new_status_text_visible() {
     assert_eq!(new_cell.fg, style::palette::text_muted());
     assert_eq!(new_cell.bg, style::palette::surface_selection());
     assert_ne!(new_cell.fg, new_cell.bg);
+}
+
+#[test]
+fn test_render_records_session_rows_skipping_group_labels_and_spacing() {
+    // Arrange
+    let backend = ratatui::backend::TestBackend::new(100, 18);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    let mut table_state = TableState::default();
+    table_state.select(Some(1));
+    let sessions = vec![
+        crate::test_support::titled_session_fixture("active-1", Status::Review),
+        crate::test_support::titled_session_fixture("queued-1", Status::Queued),
+        crate::test_support::titled_session_fixture("archive-1", Status::Done),
+    ];
+    layout_snapshot::begin_frame();
+
+    // Act
+    terminal
+        .draw(|frame| {
+            SessionListPage::new(&sessions, &mut table_state, ReasoningLevel::default(), 0)
+                .render(frame, frame.area());
+        })
+        .expect("failed to draw");
+    let snapshot = layout_snapshot::take_frame();
+
+    // Assert
+    let lines = buffer_lines(terminal.backend().buffer());
+    let row_of = |needle: &str| {
+        u16::try_from(
+            lines
+                .iter()
+                .position(|line| line.contains(needle))
+                .expect("row is painted"),
+        )
+        .expect("row fits u16")
+    };
+    let list = snapshot
+        .lists
+        .iter()
+        .find(|list| list.kind == ListRegionKind::Sessions)
+        .expect("sessions list is recorded");
+    let item_row = |index: usize| {
+        list.items
+            .iter()
+            .find(|item| item.index == index)
+            .map(|item| item.area.y)
+            .expect("session row is recorded")
+    };
+    assert_eq!(list.items.len(), 3, "group labels are not clickable items");
+    assert_eq!(item_row(0), row_of("active-1"));
+    assert_eq!(item_row(1), row_of("queued-1"));
+    assert_eq!(item_row(2), row_of("archive-1"));
+}
+
+#[test]
+fn test_session_list_rows_map_grouped_rows_back_to_session_indices() {
+    // Arrange
+    let sessions = vec![
+        crate::test_support::titled_session_fixture("queued-1", Status::Queued),
+        crate::test_support::titled_session_fixture("active-1", Status::Review),
+    ];
+    let rows = prepared_session_rows(&sessions, ReasoningLevel::default(), None, 0);
+
+    // Act
+    let list_rows = session_list_rows(&sessions, &rows);
+
+    // Assert
+    let indices: Vec<Option<usize>> = list_rows.iter().map(|row| row.index).collect();
+    assert_eq!(indices, vec![None, Some(0), None, Some(1)]);
+    assert_eq!(
+        list_rows[1].bottom_margin, 1,
+        "last row of a group adds spacing"
+    );
+    assert_eq!(list_rows[3].bottom_margin, 0);
 }

@@ -1,4 +1,4 @@
-//! Per-frame recorder for scrollable panel geometry.
+//! Per-frame recorder for scrollable panel and clickable list geometry.
 //!
 //! Pages call the `record_*` helpers while painting so the runtime can hit-test
 //! mouse coordinates against the exact rectangles the last frame used. The
@@ -12,7 +12,9 @@ use std::cell::RefCell;
 use ratatui::layout::Rect;
 
 use crate::presentation::app_mode::ViewportRect;
-use crate::presentation::viewport::{LayoutSnapshot, ScrollRegion};
+use crate::presentation::viewport::{
+    LayoutSnapshot, ListItemHit, ListRegion, ListRegionKind, ScrollRegion,
+};
 
 thread_local! {
     static FRAME_LAYOUT: RefCell<LayoutSnapshot> = RefCell::new(LayoutSnapshot::default());
@@ -47,6 +49,91 @@ pub(crate) fn record_diff_panel(region: ScrollRegion) {
 /// Records the help popup painted by the current frame.
 pub(crate) fn record_help_overlay(region: ScrollRegion) {
     FRAME_LAYOUT.with(|layout| layout.borrow_mut().help_overlay = Some(region));
+}
+
+/// Records one selectable list painted by the current frame.
+///
+/// Lists are kept in paint order so overlays painted later shadow the page
+/// lists underneath them during hit-testing.
+pub(crate) fn record_list(list: ListRegion) {
+    FRAME_LAYOUT.with(|layout| layout.borrow_mut().lists.push(list));
+}
+
+/// One rendered list row, as painted by a `ratatui` table or line list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ListRow {
+    /// Rows of trailing spacing the row adds below itself.
+    pub(crate) bottom_margin: u16,
+    /// Rows the item itself occupies.
+    pub(crate) height: u16,
+    /// Item the row selects, or `None` for labels and separators.
+    pub(crate) index: Option<usize>,
+}
+
+impl ListRow {
+    /// A one-line selectable row without spacing.
+    pub(crate) const fn item(index: usize) -> Self {
+        Self {
+            bottom_margin: 0,
+            height: 1,
+            index: Some(index),
+        }
+    }
+}
+
+/// Builds the list region for rows stacked from the top of `body`, in the
+/// order a `ratatui` table paints them after its scroll offset.
+///
+/// Rows that would start below `body` are dropped, so the region covers only
+/// what is on screen. Callers pass rows starting at the table's first visible
+/// row.
+pub(crate) fn stacked_rows_list(
+    kind: ListRegionKind,
+    body: Rect,
+    rows: impl IntoIterator<Item = ListRow>,
+) -> ListRegion {
+    let bottom = body.y.saturating_add(body.height);
+    let mut next_y = body.y;
+    let mut items = Vec::new();
+
+    for row in rows {
+        if next_y >= bottom {
+            break;
+        }
+        if let Some(index) = row.index {
+            let height = row.height.min(bottom.saturating_sub(next_y));
+            items.push(ListItemHit {
+                area: ViewportRect {
+                    height,
+                    width: body.width,
+                    x: body.x,
+                    y: next_y,
+                },
+                index,
+            });
+        }
+        next_y = next_y
+            .saturating_add(row.height)
+            .saturating_add(row.bottom_margin);
+    }
+
+    ListRegion { items, kind }
+}
+
+/// Builds the list region for `count` one-line items painted consecutively
+/// from `first_index` at the top of `body`, the shape of every option popup
+/// and windowed dropdown.
+pub(crate) fn consecutive_rows_list(
+    kind: ListRegionKind,
+    body: Rect,
+    first_index: usize,
+    count: usize,
+) -> ListRegion {
+    stacked_rows_list(
+        kind,
+        body,
+        (first_index..first_index.saturating_add(count)).map(ListRow::item),
+    )
 }
 
 /// Builds a scroll region from Ratatui geometry and rendered content metrics.

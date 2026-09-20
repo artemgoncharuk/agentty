@@ -626,3 +626,49 @@ fn selector_snapshot_separates_model_reasoning_and_speed() {
     );
     assert_eq!(theme_dropdown.title, "Select setting value");
 }
+
+#[test]
+fn test_select_action_targets_the_active_list() {
+    // Arrange
+    let view = test_settings_view("cargo test\nnpm run dev");
+    let mut state = SettingsPresentationState::default();
+
+    // Act
+    state.apply(
+        &view,
+        SettingsAction::Select(SettingRow::MouseSupport.table_index()),
+    );
+    let row_index = state.selected_list_index();
+    state.apply(&view, SettingsAction::Select(SettingRow::ROW_COUNT));
+    let row_index_after_out_of_range = state.selected_list_index();
+    state.apply(&view, SettingsAction::Activate);
+    state.apply(&view, SettingsAction::Select(0));
+    let option_index = state.selected_list_index();
+    state.apply(&view, SettingsAction::Select(9));
+    let option_index_after_out_of_range = state.selected_list_index();
+    state.apply(&view, SettingsAction::Cancel);
+    state.apply(
+        &view,
+        SettingsAction::Select(SettingRow::LaunchConfiguration.table_index()),
+    );
+    state.apply(&view, SettingsAction::Activate);
+    state.apply(&view, SettingsAction::Select(1));
+    let command_index = state.selected_list_index();
+    state.apply(&view, SettingsAction::Select(2));
+    let command_index_after_out_of_range = state.selected_list_index();
+    state.apply(&view, SettingsAction::StartAddingLaunchConfiguration);
+    state.apply(&view, SettingsAction::Select(0));
+    let command_index_while_typing = state.selected_list_index();
+
+    // Assert
+    assert_eq!(row_index, SettingRow::MouseSupport.table_index());
+    assert_eq!(row_index_after_out_of_range, row_index);
+    assert_eq!(
+        option_index, 0,
+        "Mouse Support options are [Disabled, Enabled]"
+    );
+    assert_eq!(option_index_after_out_of_range, 0);
+    assert_eq!(command_index, 1);
+    assert_eq!(command_index_after_out_of_range, 1);
+    assert_eq!(command_index_while_typing, 1);
+}

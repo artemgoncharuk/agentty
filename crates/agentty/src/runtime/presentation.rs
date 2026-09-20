@@ -16,8 +16,8 @@ use crate::ui::{self, RenderCacheStore};
 /// application workflow state.
 #[derive(Default)]
 pub(crate) struct PresentationState {
-    /// Scrollable-panel geometry recorded by the last drawn frame.
-    layout_snapshot: Cell<LayoutSnapshot>,
+    /// Scrollable-panel and list geometry recorded by the last drawn frame.
+    layout_snapshot: RefCell<LayoutSnapshot>,
     /// Scrollbar drag in progress, if any.
     mouse_drag: Cell<Option<ScrollbarDrag>>,
     project_table_state: RefCell<TableState>,
@@ -63,14 +63,14 @@ impl PresentationState {
         self.set_layout_snapshot(layout_snapshot);
     }
 
-    /// Returns the scrollable-panel geometry recorded by the last frame.
+    /// Returns the panel and list geometry recorded by the last frame.
     pub(crate) fn layout_snapshot(&self) -> LayoutSnapshot {
-        self.layout_snapshot.get()
+        self.layout_snapshot.borrow().clone()
     }
 
-    /// Stores the scrollable-panel geometry recorded by a freshly drawn frame.
+    /// Stores the panel and list geometry recorded by a freshly drawn frame.
     pub(crate) fn set_layout_snapshot(&self, layout_snapshot: LayoutSnapshot) {
-        self.layout_snapshot.set(layout_snapshot);
+        *self.layout_snapshot.borrow_mut() = layout_snapshot;
     }
 
     /// Returns the scrollbar drag in progress, if any.

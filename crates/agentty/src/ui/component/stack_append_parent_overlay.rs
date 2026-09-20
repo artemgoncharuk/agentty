@@ -6,8 +6,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::domain::session::Session;
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::style::palette;
-use crate::ui::{Component, overlay};
+use crate::ui::{Component, layout_snapshot, overlay};
 
 /// Minimum popup width sized for the action hint and useful session titles.
 const MIN_OVERLAY_WIDTH: u16 = 52;
@@ -129,9 +130,17 @@ impl Component for StackAppendParentOverlay<'_> {
         let label_width = overlay::overlay_content_width(popup_area.width)
             .saturating_sub(2)
             .max(1);
+        let block = overlay::overlay_block("Append to stack", palette::accent());
+        let visible_parents = self.visible_parent_range(popup_area.height);
+        layout_snapshot::record_list(layout_snapshot::consecutive_rows_list(
+            ListRegionKind::StackAppendParent,
+            overlay::option_rows_area(&block, popup_area),
+            visible_parents.start,
+            visible_parents.len(),
+        ));
         let paragraph = Paragraph::new(self.lines(label_width, popup_area.height))
             .alignment(Alignment::Left)
-            .block(overlay::overlay_block("Append to stack", palette::accent()));
+            .block(block);
 
         overlay::clear_popup_area(frame, popup_area);
         frame.render_widget(paragraph, popup_area);

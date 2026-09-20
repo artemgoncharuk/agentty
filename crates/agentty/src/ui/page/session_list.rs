@@ -13,8 +13,13 @@ use crate::domain::agent::ReasoningLevel;
 use crate::domain::session::{Session, SessionId, SessionSize, Status};
 use crate::domain::session_order::{self, GroupedSessionRow, SessionGroup, SessionTreePosition};
 use crate::presentation::help_action;
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::input_layout::first_table_column_width;
+use crate::ui::layout_snapshot::{self, ListRow};
 use crate::ui::{Page, layout, markdown, style};
+
+/// Rows the sessions table header occupies before the first session row.
+const SESSION_TABLE_HEADER_HEIGHT: u16 = 1;
 
 /// Uses row-background highlighting without a textual cursor glyph.
 const ROW_HIGHLIGHT_SYMBOL: &str = "";
@@ -237,7 +242,9 @@ impl Page for SessionListPage<'_> {
         let header_cells = ["Session", "Model", "Status", "Timer"]
             .iter()
             .map(|h| Cell::from(*h));
-        let header = Row::new(header_cells).style(header_style).height(1);
+        let header = Row::new(header_cells)
+            .style(header_style)
+            .height(SESSION_TABLE_HEADER_HEIGHT);
         let block = Block::default()
             .borders(Borders::ALL)
             .title("Sessions")
@@ -262,6 +269,19 @@ impl Page for SessionListPage<'_> {
         );
         let selected_session_id = selected_session_id(self.sessions, self.table_state.selected());
         let selected_row = selected_render_row(&table_rows, selected_session_id);
+        let list_rows = session_list_rows(self.sessions, &table_rows);
+        let session_rows_area = {
+            let inner = block.inner(areas.main_area);
+
+            Rect {
+                height: inner.height.saturating_sub(SESSION_TABLE_HEADER_HEIGHT),
+                y: inner
+                    .y
+                    .saturating_add(SESSION_TABLE_HEADER_HEIGHT)
+                    .min(inner.bottom()),
+                ..inner
+            }
+        };
         let is_empty = table_rows.is_empty();
         let rows = table_rows
             .into_iter()
@@ -277,6 +297,11 @@ impl Page for SessionListPage<'_> {
         let previous_selection = self.table_state.selected();
         prepare_grouped_table_state(self.table_state, selected_row);
         f.render_stateful_widget(table, areas.main_area, self.table_state);
+        layout_snapshot::record_list(layout_snapshot::stacked_rows_list(
+            ListRegionKind::Sessions,
+            session_rows_area,
+            list_rows.into_iter().skip(self.table_state.offset()),
+        ));
         self.table_state.select(previous_selection);
 
         let selected_session = self
@@ -298,6 +323,31 @@ fn session_list_help_line(selected_session: Option<&Session>) -> Line<'static> {
     );
 
     crate::ui::help_format::footer_line(&actions)
+}
+
+/// Maps each grouped render row to the session index it selects, with the
+/// spacing each row paints, so the click layout mirrors the table.
+fn session_list_rows(sessions: &[Session], rows: &[PreparedSessionRow<'_>]) -> Vec<ListRow> {
+    rows.iter()
+        .map(|row| match row {
+            PreparedSessionRow::GroupLabel { .. } => ListRow {
+                bottom_margin: 0,
+                height: 1,
+                index: None,
+            },
+            PreparedSessionRow::Session {
+                adds_group_spacing,
+                session,
+                ..
+            } => ListRow {
+                bottom_margin: u16::from(*adds_group_spacing),
+                height: 1,
+                index: sessions
+                    .iter()
+                    .position(|candidate| candidate.id == session.id),
+            },
+        })
+        .collect()
 }
 
 /// Prepares list table state for grouped row rendering.

@@ -9,8 +9,9 @@ use crate::domain::input::InputState;
 use crate::presentation::setting::{
     LaunchConfigurationListEditorMode, LaunchConfigurationListEditorSnapshot,
 };
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::style::palette;
-use crate::ui::{Component, overlay};
+use crate::ui::{Component, layout_snapshot, overlay};
 
 const FOOTER_LINE_COUNT: usize = 3;
 const MIN_OVERLAY_HEIGHT: u16 = 11;
@@ -44,6 +45,24 @@ impl<'a> LaunchConfigurationListEditor<'a> {
         }
     }
 
+    /// Returns the `[start, end)` command window painted at `popup_height`.
+    fn command_window(&self, popup_height: u16) -> (usize, usize) {
+        let command_count = self.editor.commands.len();
+        let selected_index = self
+            .editor
+            .selected_index
+            .min(command_count.saturating_sub(1));
+        let visible_command_count =
+            visible_command_count(popup_height, command_count).min(command_count);
+        let window_start =
+            command_window_start(command_count, selected_index, visible_command_count);
+        let window_end = window_start
+            .saturating_add(visible_command_count)
+            .min(command_count);
+
+        (window_start, window_end)
+    }
+
     /// Returns list-browsing render lines.
     fn browse_lines(&self, command_width: usize, popup_height: u16) -> Vec<Line<'static>> {
         let mut lines = Vec::new();
@@ -56,18 +75,11 @@ impl<'a> LaunchConfigurationListEditor<'a> {
                 .alignment(Alignment::Center),
             );
         } else {
-            let command_count = self.editor.commands.len();
             let selected_index = self
                 .editor
                 .selected_index
-                .min(command_count.saturating_sub(1));
-            let visible_command_count =
-                visible_command_count(popup_height, command_count).min(command_count);
-            let window_start =
-                command_window_start(command_count, selected_index, visible_command_count);
-            let window_end = window_start
-                .saturating_add(visible_command_count)
-                .min(command_count);
+                .min(self.editor.commands.len().saturating_sub(1));
+            let (window_start, window_end) = self.command_window(popup_height);
 
             lines.extend(
                 self.editor
@@ -145,14 +157,21 @@ impl Component for LaunchConfigurationListEditor<'_> {
             .saturating_sub(1)
             .max(1);
         let lines = self.lines(command_width, popup_area.height);
+        let block = overlay::overlay_block("Launch Configurations", palette::accent());
+        if self.editor.mode == LaunchConfigurationListEditorMode::Browse {
+            let (window_start, window_end) = self.command_window(popup_area.height);
+            layout_snapshot::record_list(layout_snapshot::consecutive_rows_list(
+                ListRegionKind::LaunchConfigurationEditor,
+                block.inner(popup_area),
+                window_start,
+                window_end.saturating_sub(window_start),
+            ));
+        }
 
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: true })
-            .block(overlay::overlay_block(
-                "Launch Configurations",
-                palette::accent(),
-            ));
+            .block(block);
 
         overlay::clear_popup_area(f, popup_area);
         f.render_widget(paragraph, popup_area);

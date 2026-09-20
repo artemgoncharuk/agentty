@@ -152,9 +152,9 @@ controller. Agentty selects each provider's native read-only or plan policy, den
 mutation permission requests, and archives any unexpected temporary diff for inspection
 before discarding it without integration.
 
-Mouse wheel scrolling and scrollbar dragging work out of the box. The `Mouse Support`
-switch on the Settings tab turns terminal mouse capture off when you prefer native
-click-drag text selection.
+Mouse wheel scrolling, scrollbar dragging, and clicking tabs, list rows, and menu
+options work out of the box. The `Mouse Support` switch on the Settings tab turns
+terminal mouse capture off when you prefer native click-drag text selection.
 
 ### Standalone Harness CLI
 

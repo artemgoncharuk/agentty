@@ -99,3 +99,21 @@ fn test_update_active_project_context_replaces_upstream_reference() {
     assert_eq!(manager.working_dir(), Path::new("/tmp/service"));
     assert_eq!(manager.git_status(), None);
 }
+
+#[test]
+fn test_select_project_index_accepts_only_existing_rows() {
+    // Arrange
+    let mut manager = project_manager_fixture();
+    manager.table_state.select(Some(0));
+
+    // Act
+    let selected = manager.select_project_index(1);
+    let index_after_select = manager.selected_project_index();
+    let rejected = manager.select_project_index(2);
+
+    // Assert
+    assert!(selected);
+    assert_eq!(index_after_select, Some(1));
+    assert!(!rejected);
+    assert_eq!(manager.selected_project_index(), Some(1));
+}

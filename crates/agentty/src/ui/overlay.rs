@@ -114,6 +114,25 @@ pub(crate) fn overlay_required_height(inner_line_count: usize) -> u16 {
     u16::try_from(inner_line_count.saturating_add(usize::from(vertical_chrome))).unwrap_or(u16::MAX)
 }
 
+/// Lines every option popup paints above its first option: the title and one
+/// blank line.
+const OPTION_POPUP_HEADER_LINES: u16 = 2;
+
+/// Returns the rows where an option popup paints its options: the frame's
+/// inner area below the shared title and blank line.
+pub(crate) fn option_rows_area(block: &Block<'_>, popup_area: Rect) -> Rect {
+    let inner = block.inner(popup_area);
+
+    Rect {
+        height: inner.height.saturating_sub(OPTION_POPUP_HEADER_LINES),
+        y: inner
+            .y
+            .saturating_add(OPTION_POPUP_HEADER_LINES)
+            .min(inner.bottom()),
+        ..inner
+    }
+}
+
 /// Builds a shared rounded overlay frame block with centered styled title and
 /// default body padding.
 pub(crate) fn overlay_block(title: &str, border_color: Color) -> Block<'static> {

@@ -6,9 +6,10 @@ use ratatui::text::{Line, Span};
 
 use super::{FileExplorer, LOADING_LABEL, NO_FILES_LABEL};
 use crate::domain::theme::ColorTheme;
+use crate::presentation::viewport::{LayoutSnapshot, ListRegionKind};
 use crate::ui::diff_util::{DiffLine, DiffLineKind, FileTreeItem};
 use crate::ui::render::Component;
-use crate::ui::style;
+use crate::ui::{layout_snapshot, style};
 
 #[test]
 fn test_render_uses_palette_border_for_file_explorer() {
@@ -484,4 +485,79 @@ fn test_file_tree_items_ignore_empty_new_path() {
 
     // Assert
     assert_eq!(items, [] as [crate::ui::diff_util::FileTreeItem; 0]);
+}
+
+/// Returns the screen row where `needle` is painted.
+fn painted_row(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+    (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, *row)].symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+        .expect("needle must be painted")
+}
+
+/// Returns the recorded row for `index` in the list of `kind`.
+fn recorded_row(snapshot: &LayoutSnapshot, kind: ListRegionKind, index: usize) -> u16 {
+    snapshot
+        .lists
+        .iter()
+        .filter(|list| list.kind == kind)
+        .flat_map(|list| list.items.iter())
+        .find(|item| item.index == index)
+        .expect("item must be recorded")
+        .area
+        .y
+}
+
+#[test]
+fn test_file_explorer_records_its_entries_from_the_render_offset() {
+    // Arrange
+    let _theme_scope = style::scoped_active_theme(ColorTheme::Current);
+    let parsed_lines = vec![
+        DiffLine {
+            kind: DiffLineKind::FileHeader,
+            old_line: None,
+            new_line: None,
+            content: DIFF_SAME_PATH_HEADER,
+        },
+        DiffLine {
+            kind: DiffLineKind::FileHeader,
+            old_line: None,
+            new_line: None,
+            content: DIFF_RENAME_HEADER,
+        },
+    ];
+    let backend = ratatui::backend::TestBackend::new(40, 10);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    layout_snapshot::begin_frame();
+
+    // Act
+    terminal
+        .draw(|frame| {
+            FileExplorer::new(&parsed_lines)
+                .focused(true)
+                .selected_index(1)
+                .render(frame, frame.area());
+        })
+        .expect("failed to draw");
+    let snapshot = layout_snapshot::take_frame();
+
+    // Assert
+    // The tree paints the shared `src/` directory row before its two files.
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::DiffFiles, 0),
+        painted_row(buffer, "src")
+    );
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::DiffFiles, 1),
+        painted_row(buffer, "main.rs")
+    );
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::DiffFiles, 2),
+        painted_row(buffer, "new.rs")
+    );
 }

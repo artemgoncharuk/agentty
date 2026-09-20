@@ -8,8 +8,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::diff_util::{DiffLine, DiffLineKind, FileTreeItem, diff_header_paths};
-use crate::ui::{Component, style};
+use crate::ui::{Component, layout_snapshot, style};
 
 const DIFF_GIT_FILE_HEADER_PREFIX: &str = "diff --git";
 
@@ -457,17 +458,18 @@ impl Component for FileExplorer {
             .map(|line| self.line_for_width(line, content_width))
             .map(ListItem::new)
             .collect();
+        let item_count = items.len();
 
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(
+                FILE_EXPLORER_TITLE,
+                Style::default().fg(style::palette::accent()),
+            ))
+            .border_style(style::border_style());
+        let rows_area = block.inner(area);
         let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Span::styled(
-                        FILE_EXPLORER_TITLE,
-                        Style::default().fg(style::palette::accent()),
-                    ))
-                    .border_style(style::border_style()),
-            )
+            .block(block)
             .highlight_style(Style::default().bg(style::palette::surface_selection()));
 
         let mut state = ListState::default();
@@ -476,6 +478,12 @@ impl Component for FileExplorer {
         }
 
         f.render_stateful_widget(list, area, &mut state);
+        layout_snapshot::record_list(layout_snapshot::consecutive_rows_list(
+            ListRegionKind::DiffFiles,
+            rows_area,
+            state.offset(),
+            item_count.saturating_sub(state.offset()),
+        ));
     }
 }
 

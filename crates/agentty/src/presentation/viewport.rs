@@ -185,13 +185,14 @@ impl ScrollbarGeometry {
     }
 }
 
-/// Scrollable panels recorded by the most recently rendered frame.
+/// Scrollable panels and clickable lists recorded by the most recently
+/// rendered frame.
 ///
 /// The frame render resets this snapshot, pages record the regions they paint,
 /// and the runtime keeps the result until the next frame replaces it. Absent
 /// regions mean the panel was not on screen, so mouse input over it is
 /// ignored.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LayoutSnapshot {
     /// Session transcript panel shown in view, prompt, and question modes.
     pub chat_output: Option<ScrollRegion>,
@@ -201,6 +202,81 @@ pub struct LayoutSnapshot {
     pub diff_panel: Option<ScrollRegion>,
     /// Keybinding help popup.
     pub help_overlay: Option<ScrollRegion>,
+    /// Selectable lists in paint order, so later (overlay) lists are found
+    /// before the page lists they cover.
+    pub lists: Vec<ListRegion>,
+}
+
+impl LayoutSnapshot {
+    /// Returns the list kind and item index painted under the pointer.
+    ///
+    /// Lists are searched from the last painted to the first so an overlay
+    /// shadows the page underneath it.
+    #[must_use]
+    pub fn list_item_at(&self, column: u16, row: u16) -> Option<(ListRegionKind, usize)> {
+        self.lists
+            .iter()
+            .rev()
+            .find_map(|list| list.item_at(column, row).map(|index| (list.kind, index)))
+    }
+}
+
+/// Selectable list painted by the last frame, with one rectangle per visible
+/// item so pointer clicks map straight to item indices.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListRegion {
+    /// Visible items and the cells each one occupies.
+    pub items: Vec<ListItemHit>,
+    /// Which selectable list this is.
+    pub kind: ListRegionKind,
+}
+
+impl ListRegion {
+    /// Returns the index of the item painted under the pointer.
+    #[must_use]
+    pub fn item_at(&self, column: u16, row: u16) -> Option<usize> {
+        self.items
+            .iter()
+            .find(|item| item.area.contains(column, row))
+            .map(|item| item.index)
+    }
+}
+
+/// One visible list item and the cells it occupies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ListItemHit {
+    /// Cells the item occupies.
+    pub area: ViewportRect,
+    /// Index of the item in its list.
+    pub index: usize,
+}
+
+/// Identifies a selectable list so the runtime knows which state a click
+/// selects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ListRegionKind {
+    /// Diff-mode changed-file explorer.
+    DiffFiles,
+    /// `Launch Configurations` list editor entries.
+    LaunchConfigurationEditor,
+    /// Launch-configuration selector opened from session view.
+    LaunchConfigurationSelector,
+    /// Projects tab table.
+    Projects,
+    /// Project switcher popup entries.
+    ProjectSwitcher,
+    /// Session creation selector options.
+    SessionCreation,
+    /// Sessions tab table.
+    Sessions,
+    /// Settings tab rows, indexed across both sections.
+    Settings,
+    /// Open settings selector dropdown options.
+    SettingsSelector,
+    /// Parent candidates for appending a session to a stack.
+    StackAppendParent,
+    /// Header tab labels, indexed by `Tab::ALL` order.
+    Tabs,
 }
 
 /// Identifies which recorded scroll region a scrollbar drag is attached to.

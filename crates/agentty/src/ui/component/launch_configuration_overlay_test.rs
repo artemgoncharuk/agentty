@@ -1,6 +1,8 @@
 use ratatui::layout::{Alignment, Rect};
 
 use super::{LaunchConfigurationOverlay, OVERLAY_DIMENSIONS};
+use crate::presentation::viewport::{LayoutSnapshot, ListRegionKind};
+use crate::ui::layout_snapshot;
 use crate::ui::render::Component;
 use crate::ui::style::palette;
 
@@ -112,4 +114,56 @@ fn test_launch_configuration_overlay_lines_center_header_text() {
 
     // Assert
     assert_eq!(header_line.alignment, Some(Alignment::Center));
+}
+
+/// Returns the screen row where `needle` is painted.
+fn painted_row(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+    (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, *row)].symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+        .expect("needle must be painted")
+}
+
+/// Returns the recorded row for `index` in the list of `kind`.
+fn recorded_row(snapshot: &LayoutSnapshot, kind: ListRegionKind, index: usize) -> u16 {
+    snapshot
+        .lists
+        .iter()
+        .filter(|list| list.kind == kind)
+        .flat_map(|list| list.items.iter())
+        .find(|item| item.index == index)
+        .expect("item must be recorded")
+        .area
+        .y
+}
+
+#[test]
+fn test_launch_configuration_overlay_records_its_command_rows() {
+    // Arrange
+    let backend = ratatui::backend::TestBackend::new(120, 40);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    let commands = vec!["cargo test".to_string(), "npm run dev".to_string()];
+    let overlay = LaunchConfigurationOverlay::new(&commands).selected_command_index(1);
+    layout_snapshot::begin_frame();
+
+    // Act
+    terminal
+        .draw(|frame| Component::render(&overlay, frame, frame.area()))
+        .expect("failed to draw");
+    let snapshot = layout_snapshot::take_frame();
+
+    // Assert
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::LaunchConfigurationSelector, 0),
+        painted_row(buffer, "cargo test")
+    );
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::LaunchConfigurationSelector, 1),
+        painted_row(buffer, "npm run dev")
+    );
 }

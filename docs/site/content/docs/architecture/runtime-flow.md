@@ -150,9 +150,12 @@ could prompt duplicate creation.
 - `run_cycle()` reconciles terminal mouse capture with the persisted `Mouse Support`
   setting before drawing, so the Settings toggle applies live and the initial state is
   set on the first cycle.
-- `ui::render_app()` returns the `LayoutSnapshot` of scrollable panels it painted;
-  `PresentationState::render()` stores it so mouse input hit-tests against the frame on
-  screen instead of recomputing layout.
+- `ui::render_app()` returns the `LayoutSnapshot` of scrollable panels and clickable
+  lists it painted; `PresentationState::render()` stores it so mouse input hit-tests
+  against the frame on screen instead of recomputing layout. A click on an
+  already-selected list item yields `MouseOutcome::Activate`, which `process_event()`
+  turns into a synthesized `Enter` key event so pointer and keyboard activation share
+  one path.
 - Tick interval is `50ms`; metadata-based session reload fallback is `5s`.
 
 ## Session Channel Composition

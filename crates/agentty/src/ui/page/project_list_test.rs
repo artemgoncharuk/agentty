@@ -16,9 +16,10 @@ use crate::domain::project::{Project, ProjectListItem};
 use crate::domain::session::DailyActivity;
 use crate::domain::theme::ColorTheme;
 use crate::presentation::help_action;
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::activity_heatmap::RecentActivityStats;
 use crate::ui::render::Page;
-use crate::ui::style;
+use crate::ui::{layout_snapshot, style};
 
 const TEST_ACTIVITY_DAY_KEY: i64 = 20_000;
 
@@ -690,4 +691,76 @@ fn foreground_symbol_cell_count(buffer: &ratatui::buffer::Buffer, symbol: &str) 
         .iter()
         .filter(|cell| cell.symbol() == symbol && cell.fg == style::palette::border())
         .count()
+}
+
+/// Returns the screen row where `needle` is painted.
+fn painted_row(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+    (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, *row)].symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+        .expect("needle must be painted")
+}
+
+#[test]
+fn test_render_records_project_rows_as_a_clickable_list() {
+    // Arrange
+    let _theme_scope = style::scoped_active_theme(ColorTheme::Current);
+    let project = |id: i64, name: &str| ProjectListItem {
+        active_session_count: 0,
+        input_tokens: 0,
+        last_session_updated_at: None,
+        output_tokens: 0,
+        project: Project {
+            created_at: 1,
+            display_name: Some(name.to_string()),
+            git_branch: Some("main".to_string()),
+            id,
+            is_favorite: false,
+            last_opened_at: None,
+            path: PathBuf::from(format!("/tmp/{name}")),
+            updated_at: 2,
+        },
+        session_count: 0,
+    };
+    let projects = vec![project(1, "alpha"), project(2, "beta")];
+    let activity: Vec<DailyActivity> = Vec::new();
+    let mut table_state = TableState::default();
+    table_state.select(Some(0));
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    layout_snapshot::begin_frame();
+
+    // Act
+    terminal
+        .draw(|frame| {
+            ProjectListPage::new(
+                &projects,
+                &[],
+                &activity,
+                &mut table_state,
+                1,
+                TEST_ACTIVITY_DAY_KEY,
+            )
+            .render(frame, frame.area());
+        })
+        .expect("failed to draw projects page");
+    let snapshot = layout_snapshot::take_frame();
+
+    // Assert
+    let buffer = terminal.backend().buffer();
+    let list = snapshot
+        .lists
+        .iter()
+        .find(|list| list.kind == ListRegionKind::Projects)
+        .expect("projects list is recorded");
+    assert_eq!(list.items.len(), 2);
+    assert_eq!(list.items[0].index, 0);
+    assert_eq!(list.items[0].area.y, painted_row(buffer, "alpha"));
+    assert_eq!(list.items[1].index, 1);
+    assert_eq!(list.items[1].area.y, painted_row(buffer, "beta"));
+    assert_eq!(list.items[0].area.height, 1);
 }

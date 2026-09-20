@@ -5,8 +5,9 @@ use super::{
     ORCHESTRATOR_SESSION_PREVIEW_DETAIL, OVERLAY_DIMENSIONS, STACKED_SESSION_DETAIL,
     SessionCreationOverlay,
 };
-use crate::ui::Component;
+use crate::presentation::viewport::{LayoutSnapshot, ListRegionKind};
 use crate::ui::style::palette;
+use crate::ui::{Component, layout_snapshot};
 
 #[test]
 fn test_session_creation_overlay_new_stores_selected_option() {
@@ -218,4 +219,57 @@ fn text_position(buffer: &ratatui::buffer::Buffer, needle: &str) -> Option<(u16,
     }
 
     None
+}
+
+/// Returns the screen row where `needle` is painted.
+fn painted_row(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+    (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, *row)].symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+        .expect("needle must be painted")
+}
+
+/// Returns the recorded row for `index` in the list of `kind`.
+fn recorded_row(snapshot: &LayoutSnapshot, kind: ListRegionKind, index: usize) -> u16 {
+    snapshot
+        .lists
+        .iter()
+        .filter(|list| list.kind == kind)
+        .flat_map(|list| list.items.iter())
+        .find(|item| item.index == index)
+        .expect("item must be recorded")
+        .area
+        .y
+}
+
+#[test]
+fn test_session_creation_overlay_records_its_option_rows() {
+    // Arrange
+    let backend = ratatui::backend::TestBackend::new(80, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    let overlay = SessionCreationOverlay::new(0, true, true);
+    layout_snapshot::begin_frame();
+
+    // Act
+    terminal
+        .draw(|frame| {
+            Component::render(&overlay, frame, frame.area());
+        })
+        .expect("failed to draw");
+    let snapshot = layout_snapshot::take_frame();
+
+    // Assert
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::SessionCreation, 0),
+        painted_row(buffer, "Regular")
+    );
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::SessionCreation, 4),
+        painted_row(buffer, "Append to stack")
+    );
 }

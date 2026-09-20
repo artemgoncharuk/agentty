@@ -131,8 +131,9 @@ For file-level detail, read the module docstrings directly.
   registry, router, parser, and transport internals stay private to `crates/ag-agent/`.
 - `runtime/`: Terminal lifecycle and the event loop — terminal setup and mouse-capture
   toggling, the event-reader thread, key dispatch, mode-focused handlers under
-  `runtime/mode/`, mouse dispatch in `runtime/mouse_handler.rs`, and shared handlers for
-  common interactions such as review-request detail navigation, session-output metrics,
+  `runtime/mode/`, mouse dispatch in `runtime/mouse_handler.rs` with list and menu
+  clicks resolved in `runtime/click_handler.rs`, and shared handlers for common
+  interactions such as review-request detail navigation, session-output metrics,
   transcript scrolling, `KeyEvent` mapping to domain input commands, and session
   review-comment navigation, address/deny marking, and batch submission. Runtime owns
   `PresentationState`, including the shared `RenderCacheStore` used by input metrics and
@@ -150,12 +151,12 @@ For file-level detail, read the module docstrings directly.
   settings snapshots; it returns typed persistence operations to `app/setting.rs`.
 - `ui/`: Rendering — frame composition, mode-to-page routing, pages under `ui/page/`,
   reusable widgets under `ui/component/`, application-to-frame projection in
-  `ui/app_render.rs`, the per-frame scroll-region recorder in `ui/layout_snapshot.rs`,
-  Agentty theme adapters for `ag-tui-text`, plus diff, layout, review-comment
-  formatting, the unified Diff Files/Comments workspace, and theme helpers.
-  `ui/session_output_assembly.rs` owns the pure transcript-to-display-line projection;
-  the `SessionOutput` component retains layout caching, scrollbar metrics, loader
-  effects, and Ratatui painting.
+  `ui/app_render.rs`, the per-frame scroll-region and clickable-list recorder in
+  `ui/layout_snapshot.rs`, Agentty theme adapters for `ag-tui-text`, plus diff, layout,
+  review-comment formatting, the unified Diff Files/Comments workspace, and theme
+  helpers. `ui/session_output_assembly.rs` owns the pure transcript-to-display-line
+  projection; the `SessionOutput` component retains layout caching, scrollbar metrics,
+  loader effects, and Ratatui painting.
 
 ## Layer Rules
 

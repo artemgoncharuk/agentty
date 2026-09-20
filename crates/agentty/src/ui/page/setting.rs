@@ -9,6 +9,8 @@ use crate::presentation::help_action;
 use crate::presentation::setting::{
     SettingsScreenSnapshot, SettingsSelectorDropdown, SettingsSelectorDropdownOption,
 };
+use crate::presentation::viewport::ListRegionKind;
+use crate::ui::layout_snapshot::{self, ListRow};
 use crate::ui::{Component, Page, component, layout, overlay, style};
 
 /// Uses row-background highlighting without a textual cursor glyph.
@@ -98,10 +100,24 @@ impl Page for SettingsPage<'_> {
             .row_highlight_style(selected_style)
             .highlight_symbol(ROW_HIGHLIGHT_SYMBOL);
 
+        let global_body = section_body_area(table_chunks[0]);
+        let project_body = section_body_area(table_chunks[1]);
         let mut global_table_state = global_table_state;
         let mut project_table_state = project_table_state;
         f.render_stateful_widget(global_table, table_chunks[0], &mut global_table_state);
         f.render_stateful_widget(project_table, table_chunks[1], &mut project_table_state);
+        layout_snapshot::record_list(layout_snapshot::stacked_rows_list(
+            ListRegionKind::Settings,
+            global_body,
+            (global_table_state.offset()..global_row_count).map(ListRow::item),
+        ));
+        layout_snapshot::record_list(layout_snapshot::stacked_rows_list(
+            ListRegionKind::Settings,
+            project_body,
+            (global_row_count.saturating_add(project_table_state.offset())
+                ..global_row_count.saturating_add(self.snapshot.project_rows.len()))
+                .map(ListRow::item),
+        ));
 
         let footer = Paragraph::new(settings_footer_line(self.snapshot));
 
@@ -128,6 +144,11 @@ impl Page for SettingsPage<'_> {
 
 /// Fixed table border height added to every settings section.
 const SETTINGS_SECTION_PADDING: usize = 2;
+
+/// Returns the rows inside one bordered settings section table.
+fn section_body_area(section_area: Rect) -> Rect {
+    Block::default().borders(Borders::ALL).inner(section_area)
+}
 
 /// Formats the active project's section title.
 fn project_section_title(project_name: Option<&str>) -> String {
@@ -181,17 +202,42 @@ fn render_settings_selector_dropdown(
     );
     let lines =
         settings_selector_dropdown_lines(selector_dropdown, popup_area.width, popup_area.height);
+    let block = overlay::overlay_block(selector_dropdown.title, style::palette::accent());
+    let (window_start, window_end) =
+        settings_selector_option_window(selector_dropdown, popup_area.height);
+    layout_snapshot::record_list(layout_snapshot::consecutive_rows_list(
+        ListRegionKind::SettingsSelector,
+        block.inner(popup_area),
+        window_start,
+        window_end.saturating_sub(window_start),
+    ));
 
     let dropdown = Paragraph::new(lines)
         .alignment(Alignment::Left)
         .wrap(Wrap { trim: true })
-        .block(overlay::overlay_block(
-            selector_dropdown.title,
-            style::palette::accent(),
-        ));
+        .block(block);
 
     overlay::clear_popup_area(f, popup_area);
     f.render_widget(dropdown, popup_area);
+}
+
+/// Returns the `[start, end)` option window painted for the dropdown height.
+fn settings_selector_option_window(
+    selector_dropdown: &SettingsSelectorDropdown,
+    popup_height: u16,
+) -> (usize, usize) {
+    let option_count = selector_dropdown.options.len();
+    let selected_index = selector_dropdown
+        .selected_index
+        .min(option_count.saturating_sub(1));
+    let visible_option_count = settings_selector_visible_option_count(popup_height, option_count);
+    let window_start =
+        settings_selector_option_window_start(option_count, selected_index, visible_option_count);
+    let window_end = window_start
+        .saturating_add(visible_option_count)
+        .min(option_count);
+
+    (window_start, window_end)
 }
 
 /// Calculates the dropdown panel area from the selected row and section.
@@ -272,16 +318,11 @@ fn settings_selector_dropdown_lines(
     let label_width = overlay::overlay_content_width(popup_width)
         .saturating_sub(2)
         .max(1);
-    let option_count = selector_dropdown.options.len();
     let selected_index = selector_dropdown
         .selected_index
-        .min(option_count.saturating_sub(1));
-    let visible_option_count = settings_selector_visible_option_count(popup_height, option_count);
-    let window_start =
-        settings_selector_option_window_start(option_count, selected_index, visible_option_count);
-    let window_end = window_start
-        .saturating_add(visible_option_count)
-        .min(option_count);
+        .min(selector_dropdown.options.len().saturating_sub(1));
+    let (window_start, window_end) =
+        settings_selector_option_window(selector_dropdown, popup_height);
     let mut lines: Vec<Line<'static>> = selector_dropdown
         .options
         .iter()

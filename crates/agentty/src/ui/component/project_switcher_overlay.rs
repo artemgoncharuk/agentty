@@ -6,8 +6,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::domain::project::ProjectListItem;
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::style::palette;
-use crate::ui::{Component, overlay};
+use crate::ui::{Component, layout_snapshot, overlay};
 
 /// Minimum popup width sized for the help hint, which is wider than typical
 /// project labels plus the active-session column.
@@ -159,9 +160,16 @@ impl Component for ProjectSwitcherOverlay<'_> {
         let label_width = overlay::overlay_content_width(popup_area.width)
             .saturating_sub(ACTIVE_COUNT_WIDTH + 3)
             .max(1);
+        let block = overlay::overlay_block("Projects", palette::accent());
+        layout_snapshot::record_list(layout_snapshot::consecutive_rows_list(
+            ListRegionKind::ProjectSwitcher,
+            overlay::option_rows_area(&block, popup_area),
+            0,
+            self.project_items.len(),
+        ));
         let paragraph = Paragraph::new(self.lines(label_width))
             .alignment(Alignment::Left)
-            .block(overlay::overlay_block("Projects", palette::accent()));
+            .block(block);
 
         overlay::clear_popup_area(f, popup_area);
         f.render_widget(paragraph, popup_area);

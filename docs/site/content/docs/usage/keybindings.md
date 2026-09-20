@@ -18,11 +18,21 @@ under `Global settings` on the Settings tab turns it off.
 
 | Gesture        | Where                                      | Action                                                        |
 | -------------- | ------------------------------------------ | ------------------------------------------------------------- |
+| Click          | Header tab labels                          | Switch to that tab                                            |
+| Click          | Projects, Sessions, and Settings rows      | Select the row; click the selected row to open it (`Enter`)   |
+| Click          | Dropdowns and popup menus                  | Select the option; click the selected option to confirm       |
+| Click          | Diff mode file list                        | Select that file                                              |
 | Wheel          | Session view, prompt input, question input | Scroll the transcript; reaching the bottom follows new output |
 | Wheel          | Diff mode right panel                      | Scroll the diff or preview panel                              |
 | Wheel          | Diff mode file list                        | Select the next or previous file                              |
 | Wheel          | Help overlay                               | Scroll the help content under the pointer                     |
 | Drag scrollbar | Session view transcript, diff panel        | Drag the thumb, or click the track to jump                    |
+
+Clicking a list item is the pointer equivalent of moving to it with `j` / `k`, and
+clicking the item that is already selected runs the same action as `Enter` on it. Popup
+menus (session creation, project switcher, stack parents, launch configurations, and
+settings dropdowns) take clicks the same way; the page underneath ignores clicks while a
+popup is open. Confirmation dialogs stay keyboard-only.
 
 Scrolling the transcript with the wheel while composing a prompt leaves the composer,
 its cursor, and question focus untouched.

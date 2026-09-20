@@ -1,10 +1,12 @@
-//! Mouse event dispatch: wheel scrolling and scrollbar dragging.
+//! Mouse event dispatch: wheel scrolling, scrollbar dragging, and list
+//! clicks.
 //!
 //! Pointer coordinates are hit-tested against the [`LayoutSnapshot`] recorded
 //! by the last rendered frame, so handlers never recompute layout. Wheel
 //! notches scroll the panel under the pointer; a left press on a scrollbar
-//! thumb starts a drag that follows the pointer until release. Everything
-//! else (moves, other buttons, horizontal wheel) is ignored.
+//! thumb starts a drag that follows the pointer until release; a left press
+//! on a recorded list item selects or activates it through `click_handler`.
+//! Everything else (moves, other buttons, horizontal wheel) is ignored.
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 
@@ -14,6 +16,7 @@ use crate::presentation::viewport::{
     LayoutSnapshot, MOUSE_WHEEL_SCROLL_LINES, ScrollRegion, ScrollRegionKind, ScrollbarDrag,
     ScrollbarGeometry,
 };
+use crate::runtime::click_handler::{self, MouseOutcome};
 use crate::runtime::{PresentationState, mode};
 
 /// Vertical wheel direction of one mouse event.
@@ -23,44 +26,44 @@ pub(crate) enum WheelDirection {
     Up,
 }
 
-/// Applies one mouse event to the app and returns whether visible state
-/// changed and a redraw is needed.
+/// Applies one mouse event to the app and returns what the event loop must
+/// do next.
 pub(crate) fn handle_mouse_event(
     app: &mut App,
     presentation: &PresentationState,
     mouse: MouseEvent,
-) -> bool {
+) -> MouseOutcome {
     let layout = presentation.layout_snapshot();
 
     match mouse.kind {
-        MouseEventKind::ScrollDown => handle_wheel(
+        MouseEventKind::ScrollDown => MouseOutcome::from_changed(handle_wheel(
             app,
             presentation,
             &layout,
             mouse.column,
             mouse.row,
             WheelDirection::Down,
-        ),
-        MouseEventKind::ScrollUp => handle_wheel(
+        )),
+        MouseEventKind::ScrollUp => MouseOutcome::from_changed(handle_wheel(
             app,
             presentation,
             &layout,
             mouse.column,
             mouse.row,
             WheelDirection::Up,
-        ),
+        )),
         MouseEventKind::Down(MouseButton::Left) => {
             handle_press(app, presentation, &layout, mouse.column, mouse.row)
         }
         MouseEventKind::Drag(MouseButton::Left) => {
-            handle_drag(app, presentation, &layout, mouse.row)
+            MouseOutcome::from_changed(handle_drag(app, presentation, &layout, mouse.row))
         }
         MouseEventKind::Up(MouseButton::Left) => {
             presentation.set_mouse_drag(None);
 
-            false
+            MouseOutcome::Ignored
         }
-        _ => false,
+        _ => MouseOutcome::Ignored,
     }
 }
 
@@ -111,16 +114,38 @@ fn handle_wheel(
     }
 }
 
-/// Starts a scrollbar drag or jumps the thumb when the press hits a track.
+/// Starts a scrollbar drag or jumps the thumb when the press hits a track,
+/// or selects the list item under the pointer.
 fn handle_press(
     app: &mut App,
     presentation: &PresentationState,
     layout: &LayoutSnapshot,
     column: u16,
     row: u16,
-) -> bool {
+) -> MouseOutcome {
     presentation.set_mouse_drag(None);
 
+    if let Some(changed) = press_scrollbar(app, presentation, layout, column, row) {
+        return MouseOutcome::from_changed(changed);
+    }
+
+    layout
+        .list_item_at(column, row)
+        .map_or(MouseOutcome::Ignored, |(kind, index)| {
+            click_handler::handle_list_click(app, presentation, kind, index)
+        })
+}
+
+/// Starts a scrollbar drag or jumps the thumb when the press hits a track.
+/// Returns whether a scroll position changed, or `None` when no scrollbar
+/// was hit.
+fn press_scrollbar(
+    app: &mut App,
+    presentation: &PresentationState,
+    layout: &LayoutSnapshot,
+    column: u16,
+    row: u16,
+) -> Option<bool> {
     if let Some(scroll_offset) = chat_scroll_offset_mut(&mut app.mode)
         && let Some(region) = layout.chat_output
         && region.scrollbar_contains(column, row)
@@ -132,9 +157,9 @@ fn handle_press(
             region: ScrollRegionKind::ChatOutput,
         }));
 
-        return jump_offset.is_some_and(|offset| {
+        return Some(jump_offset.is_some_and(|offset| {
             replace_scroll_offset(scroll_offset, chat_offset_for_region(region, offset))
-        });
+        }));
     }
 
     if let AppMode::Diff { scroll_offset, .. } = &mut app.mode
@@ -147,15 +172,15 @@ fn handle_press(
             region: ScrollRegionKind::DiffPanel,
         }));
 
-        return jump_offset.is_some_and(|offset| {
+        return Some(jump_offset.is_some_and(|offset| {
             let changed = offset != *scroll_offset;
             *scroll_offset = offset;
 
             changed
-        });
+        }));
     }
 
-    false
+    None
 }
 
 /// Moves the dragged scrollbar thumb to follow the pointer row.

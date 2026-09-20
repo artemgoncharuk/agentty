@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyEvent, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use tokio::sync::mpsc;
@@ -16,6 +16,7 @@ use crate::app::{App, AppRuntimeEvent};
 use crate::domain::input::InputCommand;
 use crate::infra::clock::Clock;
 use crate::presentation::app_mode::AppMode;
+use crate::runtime::click_handler::MouseOutcome;
 use crate::runtime::mode::chat_scroll::ChatScrollBatch;
 use crate::runtime::{
     EventResult, FRAME_INTERVAL, PresentationState, key_handler, mode, mouse_handler,
@@ -325,7 +326,9 @@ where
 /// `Event::Paste` is handled in text-input modes so multiline clipboard
 /// content is inserted as text instead of interpreted as navigation keys.
 /// `Event::Mouse` is hit-tested against the last rendered frame and only marks
-/// the app dirty when a scroll position actually changed.
+/// the app dirty when a scroll position or selection actually changed. A
+/// click on an already-selected list item is delivered as a synthesized
+/// `Enter` so pointer activation shares the keyboard path.
 async fn process_event<B: Backend>(
     app: &mut App,
     presentation: Rc<PresentationState>,
@@ -335,13 +338,34 @@ async fn process_event<B: Backend>(
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    if let Some(Event::Mouse(mouse)) = event {
-        if mouse_handler::handle_mouse_event(app, presentation.as_ref(), mouse) {
-            app.mark_dirty();
-        }
+    let event = match event {
+        Some(Event::Mouse(mouse)) => {
+            match mouse_handler::handle_mouse_event(app, presentation.as_ref(), mouse) {
+                MouseOutcome::Ignored => return Ok(EventResult::Continue),
+                MouseOutcome::Redraw => {
+                    app.mark_dirty();
 
-        return Ok(EventResult::Continue);
-    }
+                    return Ok(EventResult::Continue);
+                }
+                MouseOutcome::SwitchTab(tab) => {
+                    app.tabs.set(tab);
+                    app.persist_current_tab().await;
+                    app.mark_dirty();
+
+                    return Ok(EventResult::Continue);
+                }
+                MouseOutcome::Activate => {
+                    app.mark_dirty();
+
+                    Some(Event::Key(KeyEvent::new(
+                        KeyCode::Enter,
+                        KeyModifiers::NONE,
+                    )))
+                }
+            }
+        }
+        event => event,
+    };
 
     process_event_with_key_handler(app, terminal, event, |app, terminal, key| {
         let presentation = Rc::clone(&presentation);

@@ -3,6 +3,8 @@ use crate::domain::input::InputState;
 use crate::presentation::setting::{
     LaunchConfigurationListEditorMode, LaunchConfigurationListEditorSnapshot,
 };
+use crate::presentation::viewport::ListRegionKind;
+use crate::ui::layout_snapshot;
 use crate::ui::render::Component;
 use crate::ui::style::palette;
 
@@ -117,4 +119,34 @@ fn test_format_input_with_cursor_clamps_to_end() {
 
     // Assert
     assert_eq!(rendered, "abc|");
+}
+
+#[test]
+fn test_render_records_no_command_list_while_editing_input() {
+    // Arrange
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    let editor = LaunchConfigurationListEditorSnapshot {
+        commands: vec!["cargo test".to_string()],
+        input: Some(InputState::with_text("cargo test".to_string())),
+        mode: LaunchConfigurationListEditorMode::Edit,
+        selected_index: 0,
+    };
+    layout_snapshot::begin_frame();
+
+    // Act
+    terminal
+        .draw(|frame| {
+            LaunchConfigurationListEditor::new(&editor).render(frame, frame.area());
+        })
+        .expect("failed to draw");
+    let snapshot = layout_snapshot::take_frame();
+
+    // Assert
+    assert!(
+        !snapshot
+            .lists
+            .iter()
+            .any(|list| list.kind == ListRegionKind::LaunchConfigurationEditor)
+    );
 }

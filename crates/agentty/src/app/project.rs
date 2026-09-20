@@ -141,6 +141,22 @@ impl ProjectManager {
             .map(|project_item| project_item.project.id)
     }
 
+    /// Returns the selected project row index, when present.
+    pub(crate) fn selected_project_index(&self) -> Option<usize> {
+        self.table_state.selected()
+    }
+
+    /// Selects the project row at `index` when it exists. Returns whether the
+    /// row exists.
+    pub(crate) fn select_project_index(&mut self, index: usize) -> bool {
+        if index >= self.project_items.len() {
+            return false;
+        }
+        self.table_state.select(Some(index));
+
+        true
+    }
+
     /// Selects the next project row.
     pub(crate) fn next_project(&mut self) {
         if self.project_items.is_empty() {

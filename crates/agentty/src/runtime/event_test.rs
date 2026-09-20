@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use mockall::Sequence;
 use mockall::predicate::eq;
@@ -22,7 +22,7 @@ use super::{
     process_events_with_scroll_handler, process_paste_event, spawn_event_reader,
     spawn_event_reader_with_source,
 };
-use crate::app::{App, AppEvent};
+use crate::app::{App, AppEvent, Tab};
 use crate::domain::input::InputState;
 use crate::domain::question::QuestionItem;
 use crate::domain::session::{Session, SessionRole, SessionSize, SessionStats, Status};
@@ -35,7 +35,9 @@ use crate::presentation::app_mode::{
 use crate::presentation::help_action::HelpAction;
 use crate::presentation::prompt::{PromptAttachmentState, PromptHistoryState, PromptSlashState};
 use crate::presentation::setting::SettingsAction;
-use crate::presentation::viewport::{LayoutSnapshot, ScrollRegion};
+use crate::presentation::viewport::{
+    LayoutSnapshot, ListItemHit, ListRegion, ListRegionKind, ScrollRegion,
+};
 use crate::runtime::{EventResult, FRAME_INTERVAL, PresentationState};
 
 /// Continues a test cycle while asserting no terminal event was produced.
@@ -1161,4 +1163,133 @@ async fn test_process_event_ignores_mouse_motion() {
         }
     ));
     assert!(!app.needs_redraw());
+}
+
+/// Left press at `(column, row)`.
+fn left_press(column: u16, row: u16) -> Event {
+    Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    })
+}
+
+/// One-row list of `kind` whose item `index` sits at `(x, y)`.
+fn single_item_list(kind: ListRegionKind, index: usize, x: u16, y: u16) -> ListRegion {
+    ListRegion {
+        items: vec![ListItemHit {
+            area: ViewportRect {
+                height: 1,
+                width: 10,
+                x,
+                y,
+            },
+            index,
+        }],
+        kind,
+    }
+}
+
+/// Verifies a tab-label click switches and persists the tab.
+#[tokio::test]
+async fn test_process_event_switches_tab_from_a_header_click() {
+    // Arrange
+    let mut app = crate::test_support::new_test_app_without_retained_base_dir().await;
+    app.mode = AppMode::List;
+    app.tabs.set(Tab::Projects);
+    app.clear_redraw();
+    let presentation = Rc::new(PresentationState::default());
+    presentation.set_layout_snapshot(LayoutSnapshot {
+        lists: vec![single_item_list(ListRegionKind::Tabs, 2, 30, 1)],
+        ..LayoutSnapshot::default()
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+
+    // Act
+    let result = process_event(
+        &mut app,
+        presentation,
+        &mut terminal,
+        Some(left_press(31, 1)),
+    )
+    .await;
+
+    // Assert
+    assert!(matches!(result, Ok(EventResult::Continue)));
+    assert_eq!(app.tabs.current(), Tab::Settings);
+    assert!(app.needs_redraw());
+}
+
+/// Verifies clicking the selected settings row activates it like `Enter`.
+#[tokio::test]
+async fn test_process_event_activates_a_selected_row_click_through_the_key_path() {
+    // Arrange
+    let mut app = crate::test_support::new_test_app_without_retained_base_dir().await;
+    app.mode = AppMode::List;
+    app.tabs.set(Tab::Settings);
+    app.clear_redraw();
+    let presentation = Rc::new(PresentationState::default());
+    presentation.set_layout_snapshot(LayoutSnapshot {
+        lists: vec![single_item_list(ListRegionKind::Settings, 0, 1, 4)],
+        ..LayoutSnapshot::default()
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+
+    // Act
+    let result = process_event(
+        &mut app,
+        presentation,
+        &mut terminal,
+        Some(left_press(3, 4)),
+    )
+    .await;
+
+    // Assert
+    assert!(matches!(result, Ok(EventResult::Continue)));
+    assert!(
+        app.settings_presentation.is_selector_dropdown_open(),
+        "the Theme row was already selected, so the click opens its dropdown"
+    );
+    assert!(app.needs_redraw());
+}
+
+/// Verifies a click outside every recorded list changes nothing.
+#[tokio::test]
+async fn test_process_event_ignores_a_press_outside_lists() {
+    // Arrange
+    let mut app = crate::test_support::new_test_app_without_retained_base_dir().await;
+    app.mode = AppMode::List;
+    app.tabs.set(Tab::Settings);
+    app.clear_redraw();
+    let presentation = Rc::new(PresentationState::default());
+    presentation.set_layout_snapshot(LayoutSnapshot {
+        lists: vec![single_item_list(ListRegionKind::Settings, 1, 1, 5)],
+        ..LayoutSnapshot::default()
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+
+    // Act
+    let outside = process_event(
+        &mut app,
+        Rc::clone(&presentation),
+        &mut terminal,
+        Some(left_press(50, 20)),
+    )
+    .await;
+    let redraw_after_outside = app.needs_redraw();
+    let selected = process_event(
+        &mut app,
+        presentation,
+        &mut terminal,
+        Some(left_press(2, 5)),
+    )
+    .await;
+
+    // Assert
+    assert!(matches!(outside, Ok(EventResult::Continue)));
+    assert!(!redraw_after_outside);
+    assert!(matches!(selected, Ok(EventResult::Continue)));
+    assert_eq!(app.settings_presentation.selected_list_index(), 1);
+    assert!(app.needs_redraw());
 }

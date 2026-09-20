@@ -72,6 +72,9 @@ pub(crate) enum SettingsAction {
     MoveLaunchConfigurationUp,
     Next,
     Previous,
+    /// Selects the item at an index in the active list: an open selector's
+    /// option, a browsed launch-configuration command, or a settings row.
+    Select(usize),
     StartAddingLaunchConfiguration,
 }
 
@@ -185,6 +188,11 @@ impl SettingsPresentationState {
 
                 None
             }
+            SettingsAction::Select(index) => {
+                self.select(view, index);
+
+                None
+            }
             SettingsAction::StartAddingLaunchConfiguration => {
                 self.start_adding_launch_configuration();
 
@@ -286,6 +294,18 @@ impl SettingsPresentationState {
     /// Returns whether a setting selector is open.
     pub(crate) fn is_selector_dropdown_open(&self) -> bool {
         self.selector_dropdown.is_some()
+    }
+
+    /// Returns the selected index in the active list: the open selector's
+    /// option, the browsed launch-configuration command, or the settings row.
+    pub(crate) fn selected_list_index(&self) -> usize {
+        if let Some(selector_dropdown) = self.selector_dropdown {
+            selector_dropdown.selected_index
+        } else if let Some(editor) = &self.launch_configuration_list_editor {
+            editor.selected_index()
+        } else {
+            self.selected_row_index()
+        }
     }
 
     /// Creates the immutable settings-screen projection consumed by the UI.
@@ -464,6 +484,23 @@ impl SettingsPresentationState {
                 .checked_sub(1)
                 .unwrap_or(SettingRow::ROW_COUNT - 1);
             self.table_state.select(Some(previous_index));
+        }
+    }
+
+    fn select(&mut self, view: &SettingsView, index: usize) {
+        if let Some(selector_dropdown) = self.selector_dropdown {
+            if index < selector_dropdown.option_count(view) {
+                self.selector_dropdown = Some(SelectorDropdownState {
+                    selected_index: index,
+                    ..selector_dropdown
+                });
+            }
+        } else if let Some(editor) = &mut self.launch_configuration_list_editor {
+            if !editor.is_input_mode() && index < editor.commands.len() {
+                editor.selected_index = index;
+            }
+        } else if index < SettingRow::ROW_COUNT {
+            self.table_state.select(Some(index));
         }
     }
 

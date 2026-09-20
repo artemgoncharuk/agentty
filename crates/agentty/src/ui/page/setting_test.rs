@@ -3,14 +3,19 @@ use ratatui::text::Line;
 use ratatui::widgets::{Table, TableState};
 
 use super::{
-    ROW_HIGHLIGHT_SYMBOL, TABLE_COLUMN_SPACING, project_section_title,
+    ROW_HIGHLIGHT_SYMBOL, SettingsPage, TABLE_COLUMN_SPACING, project_section_title,
     render_settings_selector_dropdown, section_table_state, settings_footer_line_for_mode,
     settings_section_height, settings_selector_dropdown_area, settings_selector_dropdown_lines,
     settings_selector_option_window_start, settings_table_rows,
 };
 use crate::presentation::help_action;
-use crate::presentation::setting::{SettingsSelectorDropdown, SettingsSelectorDropdownOption};
-use crate::ui::style;
+use crate::presentation::setting::{
+    LaunchConfigurationListEditorMode, LaunchConfigurationListEditorSnapshot,
+    SettingsScreenSnapshot, SettingsSelectorDropdown, SettingsSelectorDropdownOption,
+};
+use crate::presentation::viewport::{LayoutSnapshot, ListRegionKind};
+use crate::ui::render::Page;
+use crate::ui::{layout_snapshot, style};
 
 #[test]
 fn test_row_highlight_symbol_uses_background_only_selection() {
@@ -307,4 +312,147 @@ fn test_settings_footer_line_uses_shared_actions_in_list_mode() {
 
     // Assert
     assert_eq!(footer_line, expected_line);
+}
+
+/// Returns the screen row where `needle` is painted.
+fn painted_row(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+    (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, *row)].symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+        .expect("needle must be painted")
+}
+
+/// Returns the recorded row for `index` in the only list of `kind`.
+fn recorded_row(snapshot: &LayoutSnapshot, kind: ListRegionKind, index: usize) -> u16 {
+    snapshot
+        .lists
+        .iter()
+        .filter(|list| list.kind == kind)
+        .flat_map(|list| list.items.iter())
+        .find(|item| item.index == index)
+        .expect("item must be recorded")
+        .area
+        .y
+}
+
+fn settings_snapshot() -> SettingsScreenSnapshot {
+    SettingsScreenSnapshot {
+        footer_hint: "",
+        global_rows: vec![
+            ("Theme", "Agentty Default".to_string()),
+            ("Mouse Support", "Enabled".to_string()),
+        ],
+        launch_configuration_list_editor: None,
+        project_rows: vec![
+            ("Default Smart Model", "claude/opus".to_string()),
+            ("Launch Configurations", "cargo test".to_string()),
+        ],
+        selected_row_index: Some(3),
+        selector_dropdown: None,
+    }
+}
+
+fn draw_settings(snapshot: &SettingsScreenSnapshot) -> (ratatui::buffer::Buffer, LayoutSnapshot) {
+    let backend = ratatui::backend::TestBackend::new(100, 30);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    layout_snapshot::begin_frame();
+    terminal
+        .draw(|frame| {
+            SettingsPage::new(snapshot, None).render(frame, frame.area());
+        })
+        .expect("failed to draw settings page");
+
+    (
+        terminal.backend().buffer().clone(),
+        layout_snapshot::take_frame(),
+    )
+}
+
+#[test]
+fn test_render_records_settings_rows_across_both_sections() {
+    // Arrange
+    let snapshot = settings_snapshot();
+
+    // Act
+    let (buffer, layout) = draw_settings(&snapshot);
+
+    // Assert
+    assert_eq!(
+        recorded_row(&layout, ListRegionKind::Settings, 0),
+        painted_row(&buffer, "Theme")
+    );
+    assert_eq!(
+        recorded_row(&layout, ListRegionKind::Settings, 1),
+        painted_row(&buffer, "Mouse Support")
+    );
+    assert_eq!(
+        recorded_row(&layout, ListRegionKind::Settings, 2),
+        painted_row(&buffer, "Default Smart Model")
+    );
+    assert_eq!(
+        recorded_row(&layout, ListRegionKind::Settings, 3),
+        painted_row(&buffer, "Launch Configurations")
+    );
+}
+
+#[test]
+fn test_render_records_open_dropdown_options_after_the_settings_rows() {
+    // Arrange
+    let mut snapshot = settings_snapshot();
+    snapshot.selector_dropdown = Some(SettingsSelectorDropdown {
+        options: vec![
+            SettingsSelectorDropdownOption {
+                label: "Option Alpha".to_string(),
+            },
+            SettingsSelectorDropdownOption {
+                label: "Option Beta".to_string(),
+            },
+        ],
+        row_index: 1,
+        selected_index: 1,
+        title: "Select setting value",
+    });
+
+    // Act
+    let (buffer, layout) = draw_settings(&snapshot);
+
+    // Assert
+    assert_eq!(
+        recorded_row(&layout, ListRegionKind::SettingsSelector, 0),
+        painted_row(&buffer, "Option Alpha")
+    );
+    assert_eq!(
+        recorded_row(&layout, ListRegionKind::SettingsSelector, 1),
+        painted_row(&buffer, "Option Beta")
+    );
+    assert_eq!(
+        layout.lists.last().map(|list| list.kind),
+        Some(ListRegionKind::SettingsSelector),
+        "the dropdown is painted after, so hit-tested before, the rows"
+    );
+}
+
+#[test]
+fn test_render_records_launch_configuration_editor_commands() {
+    // Arrange
+    let mut snapshot = settings_snapshot();
+    snapshot.launch_configuration_list_editor = Some(LaunchConfigurationListEditorSnapshot {
+        commands: vec!["cargo test".to_string(), "npm run dev".to_string()],
+        input: None,
+        mode: LaunchConfigurationListEditorMode::Browse,
+        selected_index: 1,
+    });
+
+    // Act
+    let (buffer, layout) = draw_settings(&snapshot);
+
+    // Assert
+    assert_eq!(
+        recorded_row(&layout, ListRegionKind::LaunchConfigurationEditor, 1),
+        painted_row(&buffer, "npm run dev")
+    );
 }

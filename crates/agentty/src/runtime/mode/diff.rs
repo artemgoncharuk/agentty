@@ -27,6 +27,15 @@ enum FileSelectionDirection {
     Previous,
 }
 
+/// Where a file-explorer selection change should land.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileSelectionTarget {
+    /// The file adjacent to the current one in the given direction.
+    Adjacent(FileSelectionDirection),
+    /// The file at an explicit explorer index, as painted by the last frame.
+    Index(usize),
+}
+
 /// Handles key input while the app is in `AppMode::Diff`.
 ///
 /// File selection via `j`/`k` wraps around between the first and last file
@@ -92,7 +101,7 @@ pub(crate) fn handle_mouse_wheel(
         .diff_file_list
         .is_some_and(|file_list| file_list.contains(column, row))
     {
-        if !file_list_accepts_wheel(&app.mode) {
+        if !file_list_accepts_pointer(&app.mode) {
             return false;
         }
         let file_direction = match direction {
@@ -100,16 +109,34 @@ pub(crate) fn handle_mouse_wheel(
             WheelDirection::Up => FileSelectionDirection::Previous,
         };
 
-        return move_file_selection(app, render_cache_store, file_direction);
+        return move_file_selection(
+            app,
+            render_cache_store,
+            FileSelectionTarget::Adjacent(file_direction),
+        );
     }
 
     false
 }
 
-/// Reports whether wheel input over the file explorer may move the file
+/// Selects the file explorer entry at `index` from a pointer click, exactly
+/// like moving to it with `j`/`k`. Returns whether the selection changed.
+pub(crate) fn handle_file_click(
+    app: &mut App,
+    render_cache_store: &RenderCacheStore,
+    index: usize,
+) -> bool {
+    if !file_list_accepts_pointer(&app.mode) {
+        return false;
+    }
+
+    move_file_selection(app, render_cache_store, FileSelectionTarget::Index(index))
+}
+
+/// Reports whether pointer input over the file explorer may move the file
 /// selection, mirroring the states that keep `j`/`k` away from the file list.
 /// Modes other than diff pass through so `move_file_selection` rejects them.
-fn file_list_accepts_wheel(mode: &AppMode) -> bool {
+fn file_list_accepts_pointer(mode: &AppMode) -> bool {
     let AppMode::Diff {
         line_comments,
         review_comments,
@@ -744,7 +771,11 @@ fn apply_navigation_key(
                 FileSelectionDirection::Previous
             };
 
-            return select_adjacent_file(render_cache_store, navigation, direction);
+            return select_file(
+                render_cache_store,
+                navigation,
+                FileSelectionTarget::Adjacent(direction),
+            );
         }
         KeyCode::Enter | KeyCode::Char('l')
             if *navigation.focus == DiffFocus::Files
@@ -1093,26 +1124,29 @@ fn refresh_selected_preview(
     );
 }
 
-/// Moves the explorer selection one entry with wraparound and resets the
-/// right-pane cursor, scroll, and comment selection when it changes.
+/// Moves the explorer selection to `target` — one entry with wraparound, or
+/// a clicked index — and resets the right-pane cursor, scroll, and comment
+/// selection when it changes.
 ///
 /// Returns whether the selected file changed.
-fn select_adjacent_file(
+fn select_file(
     render_cache_store: &RenderCacheStore,
     navigation: &mut DiffKeyNavigation<'_>,
-    direction: FileSelectionDirection,
+    target: FileSelectionTarget,
 ) -> bool {
     let content = render_cache_store
         .diff_layout_cache()
         .content(navigation.diff);
     let current_index = *navigation.file_explorer_selected_index;
-    let new_index = match direction {
-        FileSelectionDirection::Next => {
+    let new_index = match target {
+        FileSelectionTarget::Adjacent(FileSelectionDirection::Next) => {
             FileExplorer::next_selected_index(current_index, content.item_count())
         }
-        FileSelectionDirection::Previous => {
+        FileSelectionTarget::Adjacent(FileSelectionDirection::Previous) => {
             FileExplorer::previous_selected_index(current_index, content.item_count())
         }
+        FileSelectionTarget::Index(index) if index < content.item_count() => index,
+        FileSelectionTarget::Index(_) => current_index,
     };
     if current_index == new_index {
         return false;
@@ -1134,7 +1168,7 @@ fn select_adjacent_file(
 fn move_file_selection(
     app: &mut App,
     render_cache_store: &RenderCacheStore,
-    direction: FileSelectionDirection,
+    target: FileSelectionTarget,
 ) -> bool {
     let mode = std::mem::replace(&mut app.mode, AppMode::List);
     let AppMode::Diff {
@@ -1168,7 +1202,7 @@ fn move_file_selection(
         selected_diff_line_index: &mut selected_diff_line_index,
         session_id: &session_id,
     };
-    let selection_changed = select_adjacent_file(render_cache_store, &mut navigation, direction);
+    let selection_changed = select_file(render_cache_store, &mut navigation, target);
 
     if selection_changed && preview.is_enabled() {
         refresh_selected_preview(

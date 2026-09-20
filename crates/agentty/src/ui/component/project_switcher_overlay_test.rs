@@ -4,8 +4,9 @@ use ratatui::layout::Alignment;
 
 use super::ProjectSwitcherOverlay;
 use crate::domain::project::{Project, ProjectListItem};
-use crate::ui::Component;
+use crate::presentation::viewport::{LayoutSnapshot, ListRegionKind};
 use crate::ui::style::palette;
+use crate::ui::{Component, layout_snapshot};
 
 /// Builds one project row fixture for switcher render tests.
 fn project_list_item_fixture(id: i64, name: &str, active_session_count: u32) -> ProjectListItem {
@@ -228,4 +229,60 @@ fn test_project_switcher_overlay_lines_center_header_and_help_text() {
     // Assert
     assert_eq!(header_line.alignment, Some(Alignment::Center));
     assert_eq!(help_line.alignment, Some(Alignment::Center));
+}
+
+/// Returns the screen row where `needle` is painted.
+fn painted_row(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+    (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, *row)].symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+        .expect("needle must be painted")
+}
+
+/// Returns the recorded row for `index` in the list of `kind`.
+fn recorded_row(snapshot: &LayoutSnapshot, kind: ListRegionKind, index: usize) -> u16 {
+    snapshot
+        .lists
+        .iter()
+        .filter(|list| list.kind == kind)
+        .flat_map(|list| list.items.iter())
+        .find(|item| item.index == index)
+        .expect("item must be recorded")
+        .area
+        .y
+}
+
+#[test]
+fn test_project_switcher_overlay_records_its_project_rows() {
+    // Arrange
+    let backend = ratatui::backend::TestBackend::new(80, 24);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    let project_items = [
+        project_list_item_fixture(1, "alpha-project", 0),
+        project_list_item_fixture(2, "beta-project", 0),
+    ];
+    let project_refs = project_items.iter().collect::<Vec<_>>();
+    let overlay = ProjectSwitcherOverlay::new(&project_refs, 1, 0);
+    layout_snapshot::begin_frame();
+
+    // Act
+    terminal
+        .draw(|frame| Component::render(&overlay, frame, frame.area()))
+        .expect("failed to draw");
+    let snapshot = layout_snapshot::take_frame();
+
+    // Assert
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::ProjectSwitcher, 0),
+        painted_row(buffer, "alpha-project")
+    );
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::ProjectSwitcher, 1),
+        painted_row(buffer, "beta-project")
+    );
 }

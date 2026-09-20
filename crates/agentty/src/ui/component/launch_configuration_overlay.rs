@@ -5,8 +5,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::style::palette;
-use crate::ui::{Component, overlay};
+use crate::ui::{Component, layout_snapshot, overlay};
 
 const MIN_OVERLAY_HEIGHT: u16 = 9;
 const MIN_OVERLAY_WIDTH: u16 = 50;
@@ -99,14 +100,18 @@ impl Component for LaunchConfigurationOverlay<'_> {
             .saturating_sub(1)
             .max(1);
         let lines = self.lines(command_width);
+        let block = overlay::overlay_block("Launch Configuration", palette::accent());
+        layout_snapshot::record_list(layout_snapshot::consecutive_rows_list(
+            ListRegionKind::LaunchConfigurationSelector,
+            overlay::option_rows_area(&block, popup_area),
+            0,
+            self.commands.len(),
+        ));
 
         let paragraph = Paragraph::new(lines)
             .alignment(Alignment::Left)
             .wrap(Wrap { trim: true })
-            .block(overlay::overlay_block(
-                "Launch Configuration",
-                palette::accent(),
-            ));
+            .block(block);
 
         overlay::clear_popup_area(f, popup_area);
         f.render_widget(paragraph, popup_area);

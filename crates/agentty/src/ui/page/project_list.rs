@@ -12,12 +12,22 @@ use crate::domain::agent::{AgentCliInfo, AgentCliVersion};
 use crate::domain::project::ProjectListItem;
 use crate::domain::session::DailyActivity;
 use crate::presentation::help_action;
+use crate::presentation::viewport::ListRegionKind;
 use crate::ui::activity_heatmap::{
     RecentActivityStats, build_activity_heatmap_grid, build_recent_activity_stats,
     build_visible_heatmap_month_row, heatmap_intensity_level, heatmap_max_count,
     visible_heatmap_week_count,
 };
+use crate::ui::layout_snapshot::{self, ListRow};
 use crate::ui::{Page, layout, style};
+
+/// Height of the projects table header row.
+const PROJECT_TABLE_HEADER_ROW_HEIGHT: u16 = 1;
+/// Blank rows painted between the header and the first project row.
+const PROJECT_TABLE_HEADER_BOTTOM_MARGIN: u16 = 1;
+/// Rows the header occupies before the first project row.
+const PROJECT_TABLE_HEADER_HEIGHT: u16 =
+    PROJECT_TABLE_HEADER_ROW_HEIGHT + PROJECT_TABLE_HEADER_BOTTOM_MARGIN;
 
 const DAY_LABELS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -135,26 +145,34 @@ impl Page for ProjectListPage<'_> {
                     .fg(style::palette::text_muted())
                     .add_modifier(Modifier::BOLD),
             )
-            .height(1)
-            .bottom_margin(1);
+            .height(PROJECT_TABLE_HEADER_ROW_HEIGHT)
+            .bottom_margin(PROJECT_TABLE_HEADER_BOTTOM_MARGIN);
         let active_project_id = self.active_project_id;
         let home_directory = env::home_dir();
         let rows = self.projects.iter().map(|project_item| {
             render_project_row(project_item, active_project_id, home_directory.as_deref())
         });
+        let project_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Projects")
+            .border_style(style::border_style());
+        let project_rows_area = table_body_below_header(
+            project_block.inner(project_area),
+            PROJECT_TABLE_HEADER_HEIGHT,
+        );
         let table = Table::new(rows, project_table_column_constraints())
             .column_spacing(TABLE_COLUMN_SPACING)
             .header(header)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Projects")
-                    .border_style(style::border_style()),
-            )
+            .block(project_block)
             .row_highlight_style(selected_style)
             .highlight_symbol(ROW_HIGHLIGHT_SYMBOL);
 
         f.render_stateful_widget(table, project_area, self.table_state);
+        layout_snapshot::record_list(layout_snapshot::stacked_rows_list(
+            ListRegionKind::Projects,
+            project_rows_area,
+            (self.table_state.offset()..self.projects.len()).map(ListRow::item),
+        ));
         f.render_widget(heatmap_panel, heatmap_area);
         f.render_widget(details_panel, details_area);
         f.render_widget(agent_cli_panel, agent_cli_area);
@@ -486,3 +504,12 @@ fn left_aligned_line(content: impl Into<Line<'static>>) -> Line<'static> {
 #[cfg(test)]
 #[path = "project_list_test.rs"]
 mod tests;
+
+/// Returns the rows of `inner` below a table header of `header_height` rows.
+fn table_body_below_header(inner: Rect, header_height: u16) -> Rect {
+    Rect {
+        height: inner.height.saturating_sub(header_height),
+        y: inner.y.saturating_add(header_height).min(inner.bottom()),
+        ..inner
+    }
+}

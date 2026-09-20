@@ -6,7 +6,9 @@ use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 
 use crate::app::Tab;
 use crate::domain::project::ProjectListItem;
-use crate::ui::{Component, style};
+use crate::presentation::app_mode::ViewportRect;
+use crate::presentation::viewport::{ListItemHit, ListRegion, ListRegionKind};
+use crate::ui::{Component, layout_snapshot, style};
 
 /// Header tabs rendered at the top of list mode pages.
 pub struct Tabs<'a> {
@@ -29,40 +31,77 @@ impl Tabs<'_> {
 
 impl Component for Tabs<'_> {
     fn render(&self, f: &mut Frame, area: Rect) {
-        let line = Line::from(tab_spans(
-            self.current_tab,
-            self.active_project_id,
-            self.projects,
-        ));
-        let paragraph = Paragraph::new(line).block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(style::border_style())
-                .padding(Padding::top(1)),
+        let segments = tab_segments(self.current_tab, self.active_project_id, self.projects);
+        let block = Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(style::border_style())
+            .padding(Padding::top(1));
+        layout_snapshot::record_list(tab_list_region(&segments, block.inner(area)));
+        let line = Line::from(
+            segments
+                .into_iter()
+                .map(|(_, span)| span)
+                .collect::<Vec<_>>(),
         );
+        let paragraph = Paragraph::new(line).block(block);
         f.render_widget(paragraph, area);
     }
 }
 
-/// Returns styled tab spans with separators and a shared project-scope label.
-fn tab_spans(
+/// Returns the header line as styled spans, each paired with the tab it
+/// selects when clicked (`None` for separators and the project label).
+fn tab_segments(
     current_tab: Tab,
     active_project_id: i64,
     projects: &[ProjectListItem],
-) -> Vec<Span<'static>> {
+) -> Vec<(Option<Tab>, Span<'static>)> {
     let tab_count = Tab::project_scoped_tabs().len();
-    let mut spans = Vec::with_capacity(2 * tab_count + 3);
+    let mut segments = Vec::with_capacity(2 * tab_count + 3);
 
-    spans.push(tab_span(Tab::Projects, current_tab));
-    spans.push(tab_separator_span());
-    spans.push(project_context_span(active_project_id, projects));
+    segments.push((Some(Tab::Projects), tab_span(Tab::Projects, current_tab)));
+    segments.push((None, tab_separator_span()));
+    segments.push((None, project_context_span(active_project_id, projects)));
 
     for tab in Tab::project_scoped_tabs() {
-        spans.push(tab_separator_span());
-        spans.push(tab_span(*tab, current_tab));
+        segments.push((None, tab_separator_span()));
+        segments.push((Some(*tab), tab_span(*tab, current_tab)));
     }
 
-    spans
+    segments
+}
+
+/// Maps each tab label to the header cells it occupies on the first inner
+/// line, indexed by `Tab::ALL` order, clipped to the visible width.
+fn tab_list_region(segments: &[(Option<Tab>, Span<'static>)], inner: Rect) -> ListRegion {
+    let right_edge = inner.x.saturating_add(inner.width);
+    let mut next_x = inner.x;
+    let mut items = Vec::new();
+
+    for (tab, span) in segments {
+        let width = u16::try_from(span.width()).unwrap_or(u16::MAX);
+        if next_x >= right_edge || inner.height == 0 {
+            break;
+        }
+        if let Some(tab) = tab
+            && let Some(index) = Tab::ALL.iter().position(|candidate| candidate == tab)
+        {
+            items.push(ListItemHit {
+                area: ViewportRect {
+                    height: 1,
+                    width: width.min(right_edge.saturating_sub(next_x)),
+                    x: next_x,
+                    y: inner.y,
+                },
+                index,
+            });
+        }
+        next_x = next_x.saturating_add(width);
+    }
+
+    ListRegion {
+        items,
+        kind: ListRegionKind::Tabs,
+    }
 }
 
 /// Returns one styled separator span between tabs.

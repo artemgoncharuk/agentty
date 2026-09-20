@@ -2,8 +2,9 @@ use ratatui::layout::Rect;
 
 use super::StackAppendParentOverlay;
 use crate::domain::session::Status;
-use crate::ui::Component;
+use crate::presentation::viewport::{LayoutSnapshot, ListRegionKind};
 use crate::ui::style::palette;
+use crate::ui::{Component, layout_snapshot};
 
 #[test]
 fn test_stack_append_parent_overlay_renders_candidates_and_hint() {
@@ -97,4 +98,73 @@ fn test_stack_append_parent_overlay_windows_over_height_candidates_around_select
     assert!(text.contains("Parent 8"));
     assert!(!text.contains("Parent 0"));
     assert!(text.contains("Enter: append"));
+}
+
+/// Returns the screen row where `needle` is painted.
+fn painted_row(buffer: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+    (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|column| buffer[(column, *row)].symbol())
+                .collect::<String>()
+                .contains(needle)
+        })
+        .expect("needle must be painted")
+}
+
+/// Returns the recorded row for `index` in the list of `kind`.
+fn recorded_row(snapshot: &LayoutSnapshot, kind: ListRegionKind, index: usize) -> u16 {
+    snapshot
+        .lists
+        .iter()
+        .filter(|list| list.kind == kind)
+        .flat_map(|list| list.items.iter())
+        .find(|item| item.index == index)
+        .expect("item must be recorded")
+        .area
+        .y
+}
+
+#[test]
+fn test_stack_append_parent_overlay_records_the_visible_window() {
+    // Arrange
+    let sessions = (0..10)
+        .map(|index| {
+            let mut session = crate::test_support::titled_session_fixture(
+                &format!("parent-{index}"),
+                Status::Review,
+            );
+            session.title = Some(format!("Parent {index}"));
+
+            session
+        })
+        .collect::<Vec<_>>();
+    let parent_sessions = sessions.iter().collect::<Vec<_>>();
+    let overlay = StackAppendParentOverlay::new(&parent_sessions, 8);
+    let backend = ratatui::backend::TestBackend::new(80, 12);
+    let mut terminal = ratatui::Terminal::new(backend).expect("failed to create terminal");
+    layout_snapshot::begin_frame();
+
+    // Act
+    terminal
+        .draw(|frame| Component::render(&overlay, frame, frame.area()))
+        .expect("failed to draw");
+    let snapshot = layout_snapshot::take_frame();
+
+    // Assert
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        recorded_row(&snapshot, ListRegionKind::StackAppendParent, 8),
+        painted_row(buffer, "Parent 8")
+    );
+    let recorded_indices: Vec<usize> = snapshot
+        .lists
+        .iter()
+        .filter(|list| list.kind == ListRegionKind::StackAppendParent)
+        .flat_map(|list| list.items.iter().map(|item| item.index))
+        .collect();
+    assert!(
+        !recorded_indices.contains(&0),
+        "rows outside the window are not recorded"
+    );
 }

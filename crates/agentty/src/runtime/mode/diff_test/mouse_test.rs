@@ -1,4 +1,4 @@
-use super::super::handle_mouse_wheel;
+use super::super::{handle_file_click, handle_mouse_wheel};
 use super::support::{aligned_file_diff_fixture, diff_mode_fixture, scrollable_diff_fixture};
 use crate::presentation::app_mode::{
     AppMode, DiffCommentTarget, DiffFocus, DiffPreview, DiffReviewComments, DiffSidebarFocus,
@@ -358,4 +358,72 @@ async fn test_handle_mouse_wheel_over_file_list_ignores_input_while_comments_sid
             ..
         }
     ));
+}
+
+#[tokio::test]
+async fn test_handle_file_click_selects_an_existing_file_and_resets_the_view() {
+    // Arrange
+    let (mut app, _base_dir) = crate::test_support::new_test_app().await;
+    app.mode = diff_mode_fixture(
+        &aligned_file_diff_fixture(),
+        0,
+        DiffFocus::Content,
+        DiffPreview::Unsupported { request_id: 0 },
+    );
+    if let AppMode::Diff {
+        scroll_offset,
+        selected_diff_line_index,
+        ..
+    } = &mut app.mode
+    {
+        *scroll_offset = 4;
+        *selected_diff_line_index = 3;
+    }
+    let render_cache_store = RenderCacheStore::default();
+
+    // Act
+    let changed = handle_file_click(&mut app, &render_cache_store, 2);
+    let unchanged = handle_file_click(&mut app, &render_cache_store, 2);
+    let out_of_range = handle_file_click(&mut app, &render_cache_store, 99);
+
+    // Assert
+    assert!(changed);
+    assert!(!unchanged);
+    assert!(!out_of_range);
+    assert!(matches!(
+        app.mode,
+        AppMode::Diff {
+            file_explorer_selected_index: 2,
+            scroll_offset: 0,
+            selected_diff_line_index: 0,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn test_handle_file_click_is_ignored_while_editing_a_comment_or_outside_diff_mode() {
+    // Arrange
+    let (mut app, _base_dir) = crate::test_support::new_test_app().await;
+    let render_cache_store = RenderCacheStore::default();
+    let outside_diff = handle_file_click(&mut app, &render_cache_store, 1);
+    app.mode = diff_mode_fixture(
+        &aligned_file_diff_fixture(),
+        0,
+        DiffFocus::Content,
+        DiffPreview::Unsupported { request_id: 0 },
+    );
+    if let AppMode::Diff { line_comments, .. } = &mut app.mode {
+        line_comments.start_editing_target(DiffCommentTarget::File {
+            path: "src/main.rs".into(),
+        });
+    }
+
+    // Act
+    let while_editing = handle_file_click(&mut app, &render_cache_store, 1);
+
+    // Assert
+    assert!(!outside_diff);
+    assert!(!while_editing);
+    assert_eq!(selected_file_index(&app.mode), 0);
 }
